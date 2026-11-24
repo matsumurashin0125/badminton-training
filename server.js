@@ -2,7 +2,8 @@
 /* =========================================================
    バド基礎トレ サーバー
    - public/ の静的ファイル配信
-   - /api/* : ID + 4桁PIN ログイン、データ同期、メンバー閲覧
+   - /api/* : アカウント（追加・名前変更・削除）、データ同期、メンバー閲覧
+     ※ パスワードなし。最初にアカウントを選ぶだけの簡易方式
    保存先: Cloud Run 上では Firestore、ローカルでは data/db.json
    ========================================================= */
 const http = require('http');
@@ -13,15 +14,12 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 8080;
 const PUBLIC = path.join(__dirname, 'public');
 const STORE = process.env.STORE || (process.env.K_SERVICE ? 'firestore' : 'file');
-const MAX_FAILS = 5;                    // PINを続けて間違えられる回数
-const LOCK_MS = 15 * 60 * 1000;         // ロック時間
-const SESSION_MS = 180 * 24 * 3600 * 1000;
 const MAX_BODY = 900 * 1024;
 
 /* ---------------- storage ---------------- */
 function fileStore() {
   const file = process.env.DATA_FILE || path.join(__dirname, 'data', 'db.json');
-  let db = { users: {}, userdata: {}, sessions: {} };
+  let db = { users: {}, userdata: {} };
   try { db = Object.assign(db, JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) {}
   let timer = null;
   const persist = () => {
@@ -39,9 +37,7 @@ function fileStore() {
     async listUsers() { return Object.values(db.users).map(clone); },
     async getData(id) { return clone(db.userdata[id]); },
     async setData(id, data) { db.userdata[id] = data; persist(); },
-    async getSession(h) { return clone(db.sessions[h]); },
-    async setSession(h, s) { db.sessions[h] = s; persist(); },
-    async deleteSession(h) { delete db.sessions[h]; persist(); },
+    async deleteUser(id) { delete db.users[id]; delete db.userdata[id]; persist(); },
   };
 }
 
@@ -50,7 +46,6 @@ function firestoreStore() {
   const fsdb = new Firestore(process.env.FIRESTORE_DATABASE ? { databaseId: process.env.FIRESTORE_DATABASE } : {});
   const users = fsdb.collection('users');
   const userdata = fsdb.collection('userdata');
-  const sessions = fsdb.collection('sessions');
   const get = async ref => { const s = await ref.get(); return s.exists ? s.data() : null; };
   return {
     getUser: id => get(users.doc(id)),
@@ -62,9 +57,7 @@ function firestoreStore() {
     async listUsers() { const q = await users.get(); return q.docs.map(d => d.data()); },
     getData: id => get(userdata.doc(id)),
     setData: (id, data) => userdata.doc(id).set(data),
-    getSession: h => get(sessions.doc(h)),
-    setSession: (h, s) => sessions.doc(h).set(s),
-    deleteSession: h => sessions.doc(h).delete(),
+    async deleteUser(id) { await userdata.doc(id).delete(); await users.doc(id).delete(); },
   };
 }
 
@@ -73,13 +66,6 @@ console.log(`storage: ${STORE}`);
 
 /* ---------------- helpers ---------------- */
 const ID_RE = /^[a-z0-9_-]{3,20}$/;
-const PIN_RE = /^\d{4}$/;
-const sha = s => crypto.createHash('sha256').update(s).digest('hex');
-const hashPin = (pin, salt) => crypto.scryptSync(pin, salt, 32).toString('hex');
-const checkPin = (pin, u) => {
-  const a = Buffer.from(hashPin(pin, u.salt), 'hex'), b = Buffer.from(u.pinHash, 'hex');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-};
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 
 function send(res, status, body) {
@@ -140,115 +126,68 @@ const publicUser = u => ({
   summary: u.summary || { days: [], total: 0, totalSec: 0, lastAt: null, programCount: 0 },
 });
 
-async function newSession(userId) {
-  const token = crypto.randomBytes(32).toString('base64url');
-  await store.setSession(sha(token), { userId, exp: Date.now() + SESSION_MS });
-  return token;
-}
-async function auth(req) {
-  const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
-  if (!m) throw new HttpError(401, 'ログインしてください');
-  const s = await store.getSession(sha(m[1]));
-  if (!s || s.exp < Date.now()) throw new HttpError(401, 'ログインの有効期限が切れました');
-  const u = await store.getUser(s.userId);
-  if (!u) throw new HttpError(401, 'ユーザーが見つかりません');
-  return { user: u, hash: sha(m[1]) };
-}
-
-// IPごとの簡易レート制限（総当たり対策の補助）
-const ipHits = new Map();
-function rateLimit(req) {
-  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
-  const now = Date.now(), win = 10 * 60 * 1000;
-  const arr = (ipHits.get(ip) || []).filter(t => now - t < win);
-  arr.push(now); ipHits.set(ip, arr);
-  if (arr.length > 30) throw new HttpError(429, '試行回数が多すぎます。しばらく待ってから試してください');
-}
-
 /* ---------------- API ---------------- */
+const userPath = /^\/api\/users\/([a-z0-9_-]{3,20})(\/data)?$/;
+const newId = () => 'u' + crypto.randomBytes(4).toString('hex');
+
 async function api(req, res, url) {
   const p = url.pathname, M = req.method;
 
-  if (p === '/api/register' && M === 'POST') {
-    rateLimit(req);
-    const b = await readBody(req);
-    const id = str(b.id, 40).trim().toLowerCase(), name = str(b.name, 30).trim() || id, pin = str(b.pin, 10);
-    if (!ID_RE.test(id)) throw new HttpError(400, 'IDは半角英数字・_・- の3〜20文字にしてください');
-    if (!PIN_RE.test(pin)) throw new HttpError(400, 'パスワードは数字4桁にしてください');
-    const salt = crypto.randomBytes(16).toString('hex');
-    const data = cleanData(b.data || {});
-    const user = { id, name, salt, pinHash: hashPin(pin, salt), createdAt: Date.now(), fails: 0, lockUntil: 0, summary: summarize(data) };
-    if (!(await store.createUser(user))) throw new HttpError(409, 'そのIDはすでに使われています');
-    await store.setData(id, { ...data, updatedAt: Date.now() });
-    return send(res, 200, { token: await newSession(id), user: publicUser(user) });
-  }
-
-  if (p === '/api/login' && M === 'POST') {
-    rateLimit(req);
-    const b = await readBody(req);
-    const id = str(b.id, 40).trim().toLowerCase(), pin = str(b.pin, 10);
-    const u = ID_RE.test(id) ? await store.getUser(id) : null;
-    if (!u) throw new HttpError(401, 'IDかパスワードが違います');
-    if (u.lockUntil > Date.now()) {
-      throw new HttpError(423, `パスワードを${MAX_FAILS}回間違えたため、${Math.ceil((u.lockUntil - Date.now()) / 60000)}分間ロック中です`);
-    }
-    if (!checkPin(pin, u)) {
-      const fails = (u.fails || 0) + 1;
-      await store.updateUser(id, fails >= MAX_FAILS ? { fails: 0, lockUntil: Date.now() + LOCK_MS } : { fails });
-      throw new HttpError(401, fails >= MAX_FAILS ? `${MAX_FAILS}回間違えたため15分間ロックしました` : `IDかパスワードが違います（あと${MAX_FAILS - fails}回）`);
-    }
-    if (u.fails) await store.updateUser(id, { fails: 0, lockUntil: 0 });
-    return send(res, 200, { token: await newSession(id), user: publicUser(u) });
-  }
-
-  // ---- 以降はログイン必須 ----
-  const { user, hash } = await auth(req);
-
-  if (p === '/api/logout' && M === 'POST') { await store.deleteSession(hash); return send(res, 200, { ok: true }); }
-
-  if (p === '/api/me' && M === 'GET') {
-    const data = (await store.getData(user.id)) || cleanData({});
-    return send(res, 200, { user: publicUser(user), data });
-  }
-
-  if (p === '/api/me/data' && M === 'PUT') {
-    const data = cleanData(await readBody(req));
-    const updatedAt = Date.now();
-    await store.setData(user.id, { ...data, updatedAt });
-    await store.updateUser(user.id, { summary: summarize(data) });
-    return send(res, 200, { ok: true, updatedAt });
-  }
-
-  if (p === '/api/me/profile' && M === 'PUT') {
-    const b = await readBody(req);
-    const patch = {};
-    if (b.name !== undefined) {
-      const name = str(b.name, 30).trim();
-      if (!name) throw new HttpError(400, '表示名を入力してください');
-      patch.name = name;
-    }
-    if (b.newPin !== undefined) {
-      if (!checkPin(str(b.oldPin, 10), user)) throw new HttpError(400, '今のパスワードが違います');
-      if (!PIN_RE.test(str(b.newPin, 10))) throw new HttpError(400, '新しいパスワードは数字4桁にしてください');
-      patch.salt = crypto.randomBytes(16).toString('hex');
-      patch.pinHash = hashPin(b.newPin, patch.salt);
-    }
-    await store.updateUser(user.id, patch);
-    return send(res, 200, { user: publicUser({ ...user, ...patch }) });
-  }
-
+  // アカウント一覧
   if (p === '/api/users' && M === 'GET') {
     const list = (await store.listUsers()).map(publicUser)
-      .sort((a, b) => (b.summary.lastAt || 0) - (a.summary.lastAt || 0));
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     return send(res, 200, { users: list });
   }
 
-  const m = /^\/api\/users\/([a-z0-9_-]{3,20})$/.exec(p);
-  if (m && M === 'GET') {
-    const u = await store.getUser(m[1]);
-    if (!u) throw new HttpError(404, 'そのIDのユーザーはいません');
-    const data = (await store.getData(u.id)) || cleanData({});
-    return send(res, 200, { user: publicUser(u), programs: data.programs, history: data.history.slice(-100) });
+  // アカウント追加 { name, id?, data? }
+  if (p === '/api/users' && M === 'POST') {
+    const b = await readBody(req);
+    const name = str(b.name, 30).trim();
+    if (!name) throw new HttpError(400, '名前を入力してください');
+    let id = str(b.id, 40).trim().toLowerCase();
+    if (id && !ID_RE.test(id)) throw new HttpError(400, 'IDは半角英数字・_・- の3〜20文字にしてください（空欄なら自動で決めます）');
+    const data = cleanData(b.data || {});
+    for (let i = 0; i < 5; i++) {
+      const uidv = id || newId();
+      const user = { id: uidv, name, createdAt: Date.now(), summary: summarize(data) };
+      if (await store.createUser(user)) {
+        await store.setData(uidv, { ...data, updatedAt: Date.now() });
+        return send(res, 200, { user: publicUser(user) });
+      }
+      if (id) throw new HttpError(409, 'そのIDはすでに使われています');
+    }
+    throw new HttpError(500, 'IDを作れませんでした。もう一度試してください');
+  }
+
+  const m = userPath.exec(p);
+  if (m) {
+    const id = m[1], isData = !!m[2];
+    const u = await store.getUser(id);
+    if (!u) throw new HttpError(404, 'そのアカウントは見つかりません（削除された可能性があります）');
+
+    if (!isData && M === 'GET') {          // その人のメニューと記録
+      const data = (await store.getData(id)) || cleanData({});
+      return send(res, 200, { user: publicUser(u), programs: data.programs, history: data.history, settings: data.settings });
+    }
+    if (!isData && M === 'PUT') {          // 名前変更
+      const b = await readBody(req);
+      const name = str(b.name, 30).trim();
+      if (!name) throw new HttpError(400, '名前を入力してください');
+      await store.updateUser(id, { name });
+      return send(res, 200, { user: publicUser({ ...u, name }) });
+    }
+    if (!isData && M === 'DELETE') {       // アカウント削除（記録も消える）
+      await store.deleteUser(id);
+      return send(res, 200, { ok: true });
+    }
+    if (isData && M === 'PUT') {           // データ保存
+      const data = cleanData(await readBody(req));
+      const updatedAt = Date.now();
+      await store.setData(id, { ...data, updatedAt });
+      await store.updateUser(id, { summary: summarize(data) });
+      return send(res, 200, { ok: true, updatedAt });
+    }
   }
 
   throw new HttpError(404, 'Not found');

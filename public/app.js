@@ -5,7 +5,7 @@
    ========================================================= */
 
 const KEY = 'badtore.v1';                 // ログインなし（この端末のみ）で使うときの保存先
-const SESSION_KEY = 'badtore.session';    // { token, id, name } または { local: true }
+const SESSION_KEY = 'badtore.current';    // 選んでいるアカウント
 const PREP_SEC = 5;          // 開始前カウント
 const REST_COUNT_FROM = 5;   // インターバル残り何秒から音声カウントするか
 const WORK_COUNT_FROM = 3;   // トレーニング残り何秒から音声カウントするか
@@ -42,10 +42,10 @@ function seed() {
 const lsGet = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
 
-let session = lsGet(SESSION_KEY);   // null = 未選択（ログイン画面を出す）
-const online = () => !!(session && session.token);
-const cacheKey = () => online() ? `badtore.u.${session.id}` : KEY;
-const dirtyKey = () => `badtore.dirty.${session.id}`;
+let session = lsGet(SESSION_KEY);   // 選んでいるアカウント { id, name } / { local: true } / null = 未選択
+const online = () => !!(session && session.id);
+const cacheKey = (id = session && session.id) => id ? `badtore.u.${id}` : KEY;
+const dirtyKey = (id = session && session.id) => `badtore.dirty.${id}`;
 
 function normalize(d) {
   if (!d || !Array.isArray(d.programs)) return null;
@@ -64,37 +64,41 @@ async function api(path, opt = {}) {
   try {
     res = await fetch(path, {
       method: opt.method || 'GET',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, session && session.token ? { Authorization: 'Bearer ' + session.token } : {}),
+      headers: { 'Content-Type': 'application/json' },
       body: opt.body ? JSON.stringify(opt.body) : undefined,
     });
   } catch (e) { const er = new Error('通信できませんでした。電波の良いところで試してください'); er.offline = true; throw er; }
   let json = {};
   try { json = await res.json(); } catch (e) {}
-  if (!res.ok) {
-    const er = new Error(json.error || `エラーが発生しました (${res.status})`); er.status = res.status;
-    if (res.status === 401 && online() && !opt.noLogout) { forceLogout(); }
-    throw er;
-  }
+  if (!res.ok) { const er = new Error(json.error || `エラーが発生しました (${res.status})`); er.status = res.status; throw er; }
   return json;
 }
-let syncTimer = null, syncing = false;
+const userUrl = id => '/api/users/' + encodeURIComponent(id);
+let syncTimer = null, syncing = null;
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 800); }
-async function syncNow() {
-  if (!online() || syncing || !lsGet(dirtyKey())) return;
-  syncing = true; setSync('…');
-  const snapshot = JSON.stringify(db);
-  try {
-    await api('/api/me/data', { method: 'PUT', body: db });
-    if (JSON.stringify(db) === snapshot) lsSet(dirtyKey(), null);   // 送信中の変更がなければ同期完了
-    setSync('ok');
-  } catch (e) { setSync('err'); }
-  syncing = false;
-  if (online() && lsGet(dirtyKey()) && navigator.onLine !== false) scheduleSync();
+function syncNow() {
+  if (syncing) return syncing;
+  if (!online() || !lsGet(dirtyKey())) return Promise.resolve();
+  const id = session.id, snapshot = JSON.stringify(db);
+  setSync('…');
+  syncing = (async () => {
+    try {
+      await api(userUrl(id) + '/data', { method: 'PUT', body: JSON.parse(snapshot) });
+      if (!online() || session.id !== id || JSON.stringify(db) === snapshot) lsSet(dirtyKey(id), null);
+      setSync('ok');
+    } catch (e) {
+      setSync('err');
+      if (e.status === 404 && online() && session.id === id) accountGone();
+    }
+    syncing = null;
+    if (online() && lsGet(dirtyKey()) && navigator.onLine !== false) scheduleSync();
+  })();
+  return syncing;
 }
 function setSync(st) {
   const el = document.getElementById('sync');
   if (!el) return;
-  el.textContent = st === 'ok' ? '☁ 同期済み' : st === 'err' ? '⚠ 未同期' : '☁ 同期中…';
+  el.textContent = st === 'ok' ? '☁' : st === 'err' ? '⚠' : '…';
   el.className = 'sync ' + st;
 }
 window.addEventListener('online', syncNow);
@@ -102,24 +106,27 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 async function pullFromServer() {
   if (!online()) return;
+  const id = session.id;
   try {
     if (lsGet(dirtyKey())) { await syncNow(); return; }   // 未送信の変更があれば先に送る
-    const r = await api('/api/me');
+    const r = await api(userUrl(id));
+    if (!online() || session.id !== id) return;
     session.name = r.user.name; lsSet(SESSION_KEY, session);
-    db = normalize(r.data) || seed();
+    db = normalize(r) || seed();
     lsSet(cacheKey(), db);
     if (view === 'home' || view === 'history') render();
     setSync('ok');
-  } catch (e) { setSync('err'); }
+  } catch (e) {
+    setSync('err');
+    if (e.status === 404 && online() && session.id === id) accountGone();
+  }
 }
-function setSession(s) {
-  session = s; lsSet(SESSION_KEY, s);
-}
-function forceLogout(msg) {
-  stopPlayer && P && stopPlayer();
-  setSession(null);
-  view = 'login'; render();
-  toast(msg || 'もう一度ログインしてください');
+function setSession(s) { session = s; lsSet(SESSION_KEY, s); }
+function accountGone() {
+  if (P) stopPlayer();
+  lsSet(cacheKey(), null); lsSet(dirtyKey(), null);
+  setSession(null); view = 'accounts'; render();
+  toast('このアカウントは削除されています');
 }
 
 /* ---------------- dates / streak ---------------- */
@@ -273,8 +280,8 @@ let E = null;   // editor state
 let P = null;   // player state
 
 function render() {
-  if (!session && view !== 'login') view = 'login';
-  if (view === 'login') renderLogin();
+  if (!session && view !== 'accounts') view = 'accounts';
+  if (view === 'accounts') renderAccounts();
   else if (view === 'members') renderMembers();
   else if (view === 'member') renderMember();
   else if (view === 'home') renderHome();
@@ -318,7 +325,7 @@ function renderHome() {
 
   app.innerHTML = `
     <div class="top"><h1>🏸 バド基礎トレ</h1>
-      ${online() ? `<button class="me-chip" data-act="go-history"><span id="sync" class="sync">☁</span> ${esc(session.name)}</button>` : `<button class="me-chip" data-act="to-login">ログイン</button>`}</div>
+      ${online() ? `<button class="me-chip" data-act="switch-acct">${avatar(session, false, true)}${esc(session.name)} <span id="sync" class="sync">☁</span></button>` : `<button class="me-chip" data-act="switch-acct">アカウント</button>`}</div>
     <div class="card streak">
       <div class="flame ${doneToday ? 'on' : ''}">🔥</div>
       <div><div class="streak-num">${st}<small>日連続</small></div><div class="streak-msg">${msg}</div></div>
@@ -672,109 +679,108 @@ function renderHistory() {
     ${nav('history')}`;
 }
 
-/* ---------------- login ---------------- */
-let loginTab = 'login', loginErr = '', loginBusy = false, loginId = null, loginName = '';
-function renderLogin() {
-  const local = normalize(lsGet(KEY));
-  const hasLocal = local && local.history.length > 0;
-  const reg = loginTab === 'register';
+/* ---------------- accounts (最初に選ぶだけ) ---------------- */
+let accts = lsGet('badtore.accts'), acctsErr = '', acctManage = false;
+async function loadAccounts() {
+  acctsErr = '';
+  try { accts = (await api('/api/users')).users; lsSet('badtore.accts', accts); }
+  catch (e) { acctsErr = e.message + (e.status >= 500 ? '\n（サーバーの準備ができていない可能性があります）' : ''); }
+  if (view === 'accounts') renderAccounts();
+}
+function renderAccounts() {
+  const list = accts || [];
   app.innerHTML = `
-    <div class="login">
-      <div class="login-hero"><img src="icon.svg" alt="" width="84" height="84"><h1>バド基礎トレ</h1>
-        <p class="muted">IDと数字4桁のパスワードでログイン</p></div>
-      <div class="seg" style="margin-bottom:18px">
-        <button class="plain ${!reg ? 'on' : ''}" data-act="login-tab" data-id="login">ログイン</button>
-        <button class="plain ${reg ? 'on' : ''}" data-act="login-tab" data-id="register">新規登録</button>
+    <div class="acc">
+      <div class="login-hero"><img src="icon.svg" alt="" width="72" height="72"><h1>誰がトレーニングする？</h1>
+        <p class="muted">${acctManage ? '✎で名前変更、🗑で削除できます' : 'アカウントを選んでください'}</p></div>
+      ${acctsErr ? `<div class="err">${esc(acctsErr)}</div>` : ''}
+      <div class="acc-grid">
+        ${list.map(u => `<div class="acc-tile ${session && session.id === u.id ? 'cur' : ''} ${acctManage ? 'manage' : ''}" ${acctManage ? '' : `data-act="pick-acct" data-id="${esc(u.id)}"`}>
+          ${avatar(u, true)}
+          <div class="acc-name">${esc(u.name)}</div>
+          <div class="acc-sub">🔥${streak(new Set(u.summary.days))}・${u.summary.total}回</div>
+          ${acctManage ? `<div class="acc-ops"><button data-act="rename-acct" data-id="${esc(u.id)}" aria-label="名前を変更">✎</button><button data-act="del-acct" data-id="${esc(u.id)}" aria-label="削除">🗑</button></div>` : ''}
+        </div>`).join('')}
+        ${acctManage ? '' : `<button class="acc-tile add" data-act="add-acct"><div class="avatar big plus">＋</div><div class="acc-name">追加</div><div class="acc-sub">新しい人</div></button>`}
       </div>
-      <form id="login-form" class="card form-box" autocomplete="off">
-        <div class="field"><label>ユーザーID（半角英数字 3〜20文字）</label>
-          <input id="l-id" class="input" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="例：shin" value="${esc(loginId != null ? loginId : (lsGet('badtore.lastId') || ''))}"></div>
-        ${reg ? `<div class="field"><label>表示名（みんなに見える名前）</label>
-          <input id="l-name" class="input" placeholder="例：しん" value="${esc(loginName)}"></div>` : ''}
-        <div class="field"><label>パスワード（数字4桁）</label>
-          <input id="l-pin" class="input pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]*" placeholder="••••"></div>
-        ${reg ? `<div class="field"><label>パスワード（確認）</label>
-          <input id="l-pin2" class="input pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]*" placeholder="••••"></div>
-          ${hasLocal ? `<div class="note">この端末の記録（${local.history.length}回分）とメニューを新しいアカウントに引き継ぎます</div>` : ''}` : ''}
-        ${loginErr ? `<div class="err">${esc(loginErr)}</div>` : ''}
-        <button class="btn" type="submit" ${loginBusy ? 'disabled' : ''}>${loginBusy ? '通信中…' : reg ? '登録してはじめる' : 'ログイン'}</button>
-      </form>
-      <button class="local-link" data-act="use-local">ログインせずにこの端末だけで使う</button>
+      ${accts === null && !acctsErr ? '<div class="empty">読み込み中…</div>' : ''}
+      <div class="acc-foot">
+        ${list.length ? `<button class="btn ${acctManage ? '' : 'white'}" data-act="manage-acct">${acctManage ? '完了' : 'アカウントを管理'}</button>` : ''}
+        ${session ? `<button class="btn white" data-act="go-home">もどる</button>` : ''}
+        <button class="local-link" data-act="use-local">サーバーを使わず、この端末だけで使う</button>
+      </div>
     </div>`;
-  app.querySelector('#login-form').addEventListener('submit', e => { e.preventDefault(); doLogin(); });
 }
-async function doLogin() {
-  const reg = loginTab === 'register';
-  const q = s => app.querySelector(s);
-  const id = q('#l-id').value.trim().toLowerCase(), pin = q('#l-pin').value.trim();
-  const name = q('#l-name') ? q('#l-name').value.trim() : '';
-  loginId = id; loginName = name;
-  loginErr = '';
-  if (!/^[a-z0-9_-]{3,20}$/.test(id)) loginErr = 'IDは半角英数字・_・- の3〜20文字にしてください';
-  else if (!/^\d{4}$/.test(pin)) loginErr = 'パスワードは数字4桁です';
-  else if (reg && pin !== q('#l-pin2').value.trim()) loginErr = '確認用パスワードが一致しません';
-  if (loginErr) { renderLogin(); return; }
-  loginBusy = true; renderLogin();
-  try {
-    const body = reg
-      ? { id, pin, name, data: normalize(lsGet(KEY)) || seed() }
-      : { id, pin };
-    const r = await api(reg ? '/api/register' : '/api/login', { method: 'POST', body });
-    lsSet('badtore.lastId', id);
-    setSession({ token: r.token, id: r.user.id, name: r.user.name });
-    if (reg) { db = normalize(body.data); lsSet(cacheKey(), db); }
-    else { db = load(); lsSet(dirtyKey(), null); }
-    loginBusy = false; view = 'home'; render();
-    toast(reg ? `ようこそ、${r.user.name}さん！` : `おかえりなさい、${r.user.name}さん`);
-    if (!reg) pullFromServer();
-  } catch (e) {
-    loginBusy = false;
-    loginErr = e.message + (e.status >= 500 ? '\n（サーバーの準備ができていない可能性があります。下の「ログインせずに使う」なら端末だけで使えます）' : '');
-    renderLogin();
-  }
+function openAccounts() { acctManage = false; view = 'accounts'; render(); loadAccounts(); }
+async function pickAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  if (online()) await syncNow();
+  setSession({ id: u.id, name: u.name });
+  db = load(); view = 'home'; render();
+  toast(`${u.name}さんで始めます`);
+  pullFromServer();
 }
-
-/* ---------------- account ---------------- */
-async function editName() {
-  const v = await formDialog('表示名を変更', [{ key: 'name', label: '表示名', value: session.name }]);
-  if (!v || !v.name) return;
-  try { const r = await api('/api/me/profile', { method: 'PUT', body: { name: v.name } }); session.name = r.user.name; setSession(session); render(); toast('変更しました'); }
-  catch (e) { toast(e.message); }
-}
-async function changePin() {
-  const v = await formDialog('パスワードを変更', [
-    { key: 'oldPin', label: '今のパスワード', pin: true },
-    { key: 'newPin', label: '新しいパスワード（数字4桁）', pin: true },
-    { key: 'newPin2', label: '新しいパスワード（確認）', pin: true },
-  ], '変更する');
+async function addAccount() {
+  const v = await formDialog('アカウントを追加', [
+    { key: 'name', label: '名前（みんなに表示されます）' },
+    { key: 'id', label: 'ID（任意・半角英数字。空欄なら自動）' },
+  ], '追加する');
   if (!v) return;
-  if (!/^\d{4}$/.test(v.newPin)) { toast('新しいパスワードは数字4桁です'); return; }
-  if (v.newPin !== v.newPin2) { toast('確認用パスワードが一致しません'); return; }
-  try { await api('/api/me/profile', { method: 'PUT', body: { oldPin: v.oldPin, newPin: v.newPin }, noLogout: true }); toast('パスワードを変更しました'); }
-  catch (e) { toast(e.message); }
+  if (!v.name) { toast('名前を入力してください'); return; }
+  let data = seed();
+  const legacy = normalize(lsGet(KEY));
+  if (legacy && legacy.history.length && !lsGet('badtore.imported')) {
+    if (await confirmDlg('記録の引き継ぎ', `この端末にある記録（${legacy.history.length}回分）とメニューを「${v.name}」に引き継ぎますか？`, '引き継ぐ')) {
+      data = legacy; lsSet('badtore.imported', 1);
+    }
+  }
+  try {
+    const r = await api('/api/users', { method: 'POST', body: { name: v.name, id: v.id.toLowerCase(), data } });
+    accts = (accts || []).concat(r.user); lsSet('badtore.accts', accts);
+    lsSet(cacheKey(r.user.id), data);
+    await pickAccount(r.user.id);
+  } catch (e) { toast(e.message); }
 }
-async function logout() {
-  if (!(await confirmDlg('ログアウト', `${session.name}（@${session.id}）からログアウトしますか？`, 'ログアウト'))) return;
-  if (lsGet(dirtyKey())) await syncNow();
-  try { await api('/api/logout', { method: 'POST', noLogout: true }); } catch (e) {}
-  lsSet(cacheKey(), null); lsSet(dirtyKey(), null);
-  setSession(null); view = 'login'; loginTab = 'login'; loginErr = ''; render();
+async function renameAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  const v = await formDialog('名前を変更', [{ key: 'name', label: '名前', value: u.name }]);
+  if (!v || !v.name || v.name === u.name) return;
+  try {
+    await api(userUrl(id), { method: 'PUT', body: { name: v.name } });
+    u.name = v.name; lsSet('badtore.accts', accts);
+    if (session && session.id === id) { session.name = v.name; setSession(session); }
+    render(); toast('名前を変更しました');
+  } catch (e) { toast(e.message); }
+}
+async function deleteAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  if (!(await confirmDlg('アカウントを削除', `「${u.name}」を削除しますか？\nメニューとトレーニング記録もすべて消え、元に戻せません。`, '削除する', true))) return;
+  try {
+    await api(userUrl(id), { method: 'DELETE' });
+    accts = accts.filter(x => x.id !== id); lsSet('badtore.accts', accts);
+    lsSet(cacheKey(id), null); lsSet(dirtyKey(id), null);
+    if (session && session.id === id) setSession(null);
+    if (!accts.length) acctManage = false;
+    render(); toast('削除しました');
+  } catch (e) { toast(e.message); }
 }
 function accountCard() {
   if (online()) {
     return `<div class="card acct">
-      <div class="avatar">${esc((session.name || session.id).slice(0, 1))}</div>
+      ${avatar(session)}
       <div style="flex:1;min-width:0"><b>${esc(session.name)}</b><div class="muted">@${esc(session.id)}</div></div>
     </div>
     <div class="acct-btns">
-      <button class="btn white" data-act="acct-name">表示名を変更</button>
-      <button class="btn white" data-act="acct-pin">パスワード変更</button>
-      <button class="btn red" data-act="acct-logout">ログアウト</button>
+      <button class="btn blue" data-act="switch-acct">アカウントを切り替え・管理</button>
+      <button class="btn white" data-act="rename-acct" data-id="${esc(session.id)}">名前を変更</button>
     </div>`;
   }
   return `<div class="card acct"><div style="flex:1"><b>この端末だけで使っています</b>
-      <div class="muted">ログインすると、みんなの記録を見たりメニューをもらえます。今の記録は新規登録で引き継げます。</div></div></div>
-    <div class="acct-btns"><button class="btn blue" data-act="to-login">ログイン / 新規登録</button></div>`;
+      <div class="muted">アカウントを選ぶと、みんなの記録を見たりメニューをもらえます。今の記録はアカウント追加のときに引き継げます。</div></div></div>
+    <div class="acct-btns"><button class="btn blue" data-act="switch-acct">アカウントを選ぶ</button></div>`;
 }
 
 /* ---------------- members ---------------- */
@@ -784,7 +790,7 @@ const ago = t => {
   const d = Math.floor((Date.now() - t) / 86400000);
   return d <= 0 ? '今日' : d === 1 ? '昨日' : `${d}日前`;
 };
-const avatar = (u, big) => `<div class="avatar ${big ? 'big' : ''}" style="background:hsl(${[...u.id].reduce((a, c) => a + c.charCodeAt(0), 0) * 37 % 360} 70% 55%)">${esc((u.name || u.id).slice(0, 1))}</div>`;
+const avatar = (u, big, mini) => `<div class="avatar ${big ? 'big' : ''} ${mini ? 'mini' : ''}" style="background:hsl(${[...u.id].reduce((a, c) => a + c.charCodeAt(0), 0) * 37 % 360} 70% 55%)">${esc((u.name || u.id).slice(0, 1))}</div>`;
 
 async function loadMembers() {
   membersErr = '';
@@ -795,8 +801,8 @@ async function loadMembers() {
 function renderMembers() {
   if (!online()) {
     app.innerHTML = `<div class="top"><h1>👥 みんな</h1></div>
-      <div class="wrap"><div class="card empty">ログインすると、ほかの人のメニューや記録を見られます。
-        <div style="margin-top:16px"><button class="btn blue" data-act="to-login">ログイン / 新規登録</button></div></div></div>${nav('members')}`;
+      <div class="wrap"><div class="card empty">アカウントを選ぶと、ほかの人のメニューや記録を見られます。
+        <div style="margin-top:16px"><button class="btn blue" data-act="switch-acct">アカウントを選ぶ</button></div></div></div>${nav('members')}`;
     return;
   }
   app.innerHTML = `
@@ -904,12 +910,15 @@ app.addEventListener('click', e => {
     case 'open-member': openMember(id); break;
     case 'toggle-mprog': memberOpen[id] = !memberOpen[id]; { const y = window.scrollY; renderMember(); window.scrollTo(0, y); } break;
     case 'copy-prog': copyProgram(id); break;
-    case 'login-tab': loginTab = id; loginErr = ''; renderLogin(); break;
-    case 'use-local': setSession({ local: true }); db = load(); view = 'home'; render(); break;
-    case 'to-login': setSession(null); view = 'login'; loginErr = ''; render(); break;
-    case 'acct-name': editName(); break;
-    case 'acct-pin': changePin(); break;
-    case 'acct-logout': logout(); break;
+    case 'switch-acct': openAccounts(); break;
+    case 'pick-acct': pickAccount(id); break;
+    case 'add-acct': addAccount(); break;
+    case 'rename-acct': renameAccount(id); break;
+    case 'del-acct': deleteAccount(id); break;
+    case 'manage-acct': acctManage = !acctManage; renderAccounts(); break;
+    case 'use-local':
+      (online() ? syncNow() : Promise.resolve()).then(() => { setSession({ local: true }); db = load(); view = 'home'; render(); });
+      break;
     case 'filter': homeFilter = id; render(); break;
     case 'start': startProgram(id); break;
     case 'edit': openEditor(id); break;
@@ -962,8 +971,9 @@ app.addEventListener('click', e => {
   }
 });
 
-if (!session) view = 'login';
+if (!session) view = 'accounts';
 render();
+if (!session) loadAccounts();
 pullFromServer();
 
 /* ---------------- PWA ---------------- */

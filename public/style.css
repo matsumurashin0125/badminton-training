@@ -173,7 +173,6 @@ input{font:inherit}
 .login-hero{text-align:center;margin-bottom:22px}
 .login-hero img{border-radius:22px;box-shadow:0 4px 0 var(--green-d)}
 .login-hero h1{font-size:26px;margin:14px 0 4px;font-weight:900}
-.input.pin{letter-spacing:.6em;text-align:center;font-size:24px;font-weight:900}
 .err{background:#ffe5e5;color:var(--red-d);border-radius:12px;padding:10px 12px;font-size:13px;font-weight:700;margin:0 0 14px;white-space:pre-line}
 .note{background:#ddf4ff;color:var(--blue-d);border-radius:12px;padding:10px 12px;font-size:13px;font-weight:700;margin:0 0 14px}
 .local-link{display:block;margin:22px auto 0;color:var(--sub);font-size:13px;font-weight:700;text-decoration:underline}
@@ -193,3 +192,20 @@ input{font:inherit}
 .chev{color:#aaa;font-size:12px}
 .mitems{margin:12px 0 4px;padding-left:22px;font-size:14px;line-height:1.9}
 .btn.small{padding:11px;font-size:14px;margin-top:12px}
+
+/* ---------- account picker ---------- */
+.acc{padding:5vh 18px 30px;max-width:520px;margin:0 auto}
+.acc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.acc-tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;padding:16px 6px 12px;background:#fff;border:2px solid var(--line);border-bottom-width:4px;border-radius:18px;cursor:pointer;font:inherit}
+.acc-tile:active{transform:translateY(2px)}
+.acc-tile.cur{border-color:var(--green)}
+.acc-tile.manage{cursor:default;animation:wiggle .3s}
+.acc-tile.add{border-style:dashed}
+.acc-name{font-weight:900;font-size:15px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acc-sub{font-size:12px;color:var(--sub);font-weight:700}
+.avatar.plus{background:#eee;color:#aaa;font-size:30px}
+.avatar.mini{width:22px;height:22px;font-size:11px}
+.acc-ops{display:flex;gap:6px;margin-top:4px}
+.acc-ops button{width:40px;height:36px;border-radius:10px;background:#f2f2f2;font-size:16px}
+.acc-foot{display:grid;gap:12px;margin-top:24px}
+@keyframes wiggle{25%{transform:rotate(-1.5deg)}75%{transform:rotate(1.5deg)}}
