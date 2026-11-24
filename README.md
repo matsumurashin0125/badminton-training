@@ -14,7 +14,7 @@ GitHub に push すると Cloud Run に自動デプロイされます。
 
 
 ## 複数人で使う（アカウント）
-- 最初に「誰がトレーニングする？」画面で**アカウントを選ぶだけ**（パスワードなし）。データはサーバー（Firestore）に保存され、どの端末からでも同じ記録が見られます
+- 最初に「誰がトレーニングする？」画面で**アカウントを選ぶだけ**（パスワードなし）。データはサーバー（Cloud Storage）に保存され、どの端末からでも同じ記録が見られます
 - **アカウント管理**：「＋追加」で名前（とIDは任意）を入れて追加、「アカウントを管理」から ✎名前変更・🗑削除（削除するとその人のメニューと記録も消えます）
 - ホーム右上の自分の名前をタップすると、いつでもアカウントを切り替え
 - **👥みんな**タブ：メンバー一覧（連続日数・合計回数・最終トレーニング日）、IDか名前で検索。タップするとその人のメニューと記録が見られます
@@ -26,9 +26,9 @@ GitHub に push すると Cloud Run に自動デプロイされます。
 
 ## フォルダ構成
 ```
-server.js          サーバー（静的配信＋API）。Cloud Run では Firestore、ローカルでは data/db.json に保存
+server.js          サーバー（静的配信＋API）。Cloud Run では Cloud Storage、ローカルでは data/db.json に保存
 public/            アプリ画面（HTML/CSS/JS、PWA）
-package.json       依存ライブラリ（@google-cloud/firestore）
+package.json       依存ライブラリ（@google-cloud/storage）
 Dockerfile         Cloud Run 用イメージ（Node.js 22）
 ```
 
@@ -38,22 +38,31 @@ npm install
 npm run dev        # → http://localhost:8080 （data/db.json に保存）
 ```
 
-## 初回だけ：Firestore の準備（アカウント機能に必要）
-Cloud Shell で（`PROJECT_ID` を置き換え）：
+## 初回だけ：Cloud Storage の準備（アカウント機能に必要）
+データはバケットの中に `users/<ID>.json`（名前など）と `userdata/<ID>.json`（メニュー・記録）として保存されます。
+Cloud Shell で（`PROJECT_ID` を置き換え。サービス名・リージョンが違う場合は合わせる）：
 
 ```bash
 PROJECT_ID=your-project-id
-gcloud services enable firestore.googleapis.com --project $PROJECT_ID
-gcloud firestore databases create --location=asia-northeast1 --type=firestore-native --project $PROJECT_ID
+BUCKET=$PROJECT_ID-badminton-data
 
-# Cloud Run が使うサービスアカウントに Firestore の読み書き権限を付与
+# 1. バケットを作る（非公開・東京）
+gcloud storage buckets create gs://$BUCKET --project $PROJECT_ID \
+  --location=asia-northeast1 --uniform-bucket-level-access --public-access-prevention
+
+# 2. Cloud Run のサービスアカウントにバケットの読み書き権限をつける
 SA=$(gcloud run services describe badminton-training --region asia-northeast1 --project $PROJECT_ID --format='value(spec.template.spec.serviceAccountName)')
 [ -z "$SA" ] && SA="$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
-gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:$SA" --role=roles/datastore.user
+gcloud storage buckets add-iam-policy-binding gs://$BUCKET --member="serviceAccount:$SA" --role=roles/storage.objectUser
+
+# 3. Cloud Run にバケット名を教える（環境変数 BUCKET）
+gcloud run services update badminton-training --region asia-northeast1 --project $PROJECT_ID --update-env-vars BUCKET=$BUCKET
 ```
 
-（サービス名・リージョンが違う場合は `badminton-training` / `asia-northeast1` を合わせてください）
-コンソールでやる場合：「Firestore」→「データベースを作成」→ ネイティブモード・東京、IAM でCloud Runのサービスアカウントに「Cloud Datastore ユーザー」を追加。
+コンソールでやる場合：「Cloud Storage」→「バケットを作成」（東京・公開アクセス防止オン）→ バケットの「権限」で Cloud Run のサービスアカウントに「Storage オブジェクト ユーザー」を追加 → Cloud Run のサービス →「新しいリビジョンの編集とデプロイ」→ 変数とシークレットに `BUCKET` = バケット名。
+
+> BUCKET を設定していないと、アカウント画面に「保存先が設定されていません」と出ます（その間も「この端末だけで使う」は使えます）。
+> 少人数で使う分には、Cloud Storage の無料枠内に収まる見込みです。
 
 ## デプロイ方法
 Cloud Run の「リポジトリから継続的にデプロイ」（ビルドタイプ：Dockerfile）を設定していれば、main に push／マージするだけで反映されます。
@@ -63,7 +72,6 @@ Cloud Run の「リポジトリから継続的にデプロイ」（ビルドタ�
 - 開始前カウント秒数・音声カウント開始秒数：`public/app.js` 冒頭の `PREP_SEC` / `REST_COUNT_FROM` / `WORK_COUNT_FROM`
 - 種目の候補（チップ）：`PRESETS`
 - アプリ更新がスマホに反映されないとき：`public/sw.js` の `VERSION` を上げる
-- Firestore のデータベースIDを `(default)` 以外にした場合：Cloud Run の環境変数 `FIRESTORE_DATABASE` に指定
 
 ## 補足
 - 音声は端末の読み上げ機能（Web Speech API）を使います。iPhone はマナーモードだと音が出ないことがあります。
