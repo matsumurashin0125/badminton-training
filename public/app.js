@@ -1,10 +1,11 @@
 'use strict';
 /* =========================================================
    バド基礎トレ  — カウントダウン式トレーニング記録アプリ
-   データは端末のブラウザ(localStorage)に保存されます
+   ログインするとサーバー(Firestore)に同期、未ログインなら端末だけに保存
    ========================================================= */
 
-const KEY = 'badtore.v1';
+const KEY = 'badtore.v1';                 // ログインなし（この端末のみ）で使うときの保存先
+const SESSION_KEY = 'badtore.current';    // 選んでいるアカウント
 const PREP_SEC = 5;          // 開始前カウント
 const REST_COUNT_FROM = 5;   // インターバル残り何秒から音声カウントするか
 const WORK_COUNT_FROM = 3;   // トレーニング残り何秒から音声カウントするか
@@ -38,36 +39,110 @@ function seed() {
     ],
   };
 }
-function load() {
-  try {
-    const d = JSON.parse(localStorage.getItem(KEY));
-    if (d && Array.isArray(d.programs)) {
-      d.settings = Object.assign({ voice: true }, d.settings);
-      d.history = d.history || [];
-      return d;
-    }
-  } catch (e) {}
-  return seed();
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+let session = lsGet(SESSION_KEY);   // 選んでいるアカウント { id, name } / { local: true } / null = 未選択
+const online = () => !!(session && session.id);
+const cacheKey = (id = session && session.id) => id ? `badtore.u.${id}` : KEY;
+const dirtyKey = (id = session && session.id) => `badtore.dirty.${id}`;
+
+function normalize(d) {
+  if (!d || !Array.isArray(d.programs)) return null;
+  return { programs: d.programs, history: Array.isArray(d.history) ? d.history : [], settings: Object.assign({ voice: true }, d.settings) };
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} }
+function load() { return normalize(lsGet(cacheKey())) || seed(); }
+function save() {
+  lsSet(cacheKey(), db);
+  if (online()) { lsSet(dirtyKey(), 1); scheduleSync(); }
+}
 let db = load();
-save();
+
+/* ---------------- server API / 同期 ---------------- */
+async function api(path, opt = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opt.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: opt.body ? JSON.stringify(opt.body) : undefined,
+    });
+  } catch (e) { const er = new Error('通信できませんでした。電波の良いところで試してください'); er.offline = true; throw er; }
+  let json = {};
+  try { json = await res.json(); } catch (e) {}
+  if (!res.ok) { const er = new Error(json.error || `エラーが発生しました (${res.status})`); er.status = res.status; throw er; }
+  return json;
+}
+const userUrl = id => '/api/users/' + encodeURIComponent(id);
+let syncTimer = null, syncing = null;
+function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 800); }
+function syncNow() {
+  if (syncing) return syncing;
+  if (!online() || !lsGet(dirtyKey())) return Promise.resolve();
+  const id = session.id, snapshot = JSON.stringify(db);
+  setSync('…');
+  syncing = (async () => {
+    try {
+      await api(userUrl(id) + '/data', { method: 'PUT', body: JSON.parse(snapshot) });
+      if (!online() || session.id !== id || JSON.stringify(db) === snapshot) lsSet(dirtyKey(id), null);
+      setSync('ok');
+    } catch (e) {
+      setSync('err');
+      if (e.status === 404 && online() && session.id === id) accountGone();
+    }
+    syncing = null;
+    if (online() && lsGet(dirtyKey()) && navigator.onLine !== false) scheduleSync();
+  })();
+  return syncing;
+}
+function setSync(st) {
+  const el = document.getElementById('sync');
+  if (!el) return;
+  el.textContent = st === 'ok' ? '☁' : st === 'err' ? '⚠' : '…';
+  el.className = 'sync ' + st;
+}
+window.addEventListener('online', syncNow);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
+
+async function pullFromServer() {
+  if (!online()) return;
+  const id = session.id;
+  try {
+    if (lsGet(dirtyKey())) { await syncNow(); return; }   // 未送信の変更があれば先に送る
+    const r = await api(userUrl(id));
+    if (!online() || session.id !== id) return;
+    session.name = r.user.name; lsSet(SESSION_KEY, session);
+    db = normalize(r) || seed();
+    lsSet(cacheKey(), db);
+    if (view === 'home' || view === 'history') render();
+    setSync('ok');
+  } catch (e) {
+    setSync('err');
+    if (e.status === 404 && online() && session.id === id) accountGone();
+  }
+}
+function setSession(s) { session = s; lsSet(SESSION_KEY, s); }
+function accountGone() {
+  if (P) stopPlayer();
+  lsSet(cacheKey(), null); lsSet(dirtyKey(), null);
+  setSession(null); view = 'accounts'; render();
+  toast('このアカウントは削除されています');
+}
 
 /* ---------------- dates / streak ---------------- */
 const pad = n => String(n).padStart(2, '0');
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const doneDays = () => new Set(db.history.map(h => h.day));
-function streak() {
-  const s = doneDays();
+function streak(s = doneDays()) {
   let d = new Date();
   if (!s.has(dayKey(d))) d = addDays(d, -1);   // 今日まだでも昨日までの連続は維持
   let n = 0;
   while (s.has(dayKey(d))) { n++; d = addDays(d, -1); }
   return n;
 }
-function bestStreak() {
-  const days = [...doneDays()].sort();
+function bestStreak(set = doneDays()) {
+  const days = [...set].sort();
   let best = 0, cur = 0, prev = null;
   for (const k of days) {
     cur = (prev && dayKey(addDays(prev, 1)) === k) ? cur + 1 : 1;
@@ -124,23 +199,34 @@ function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wa
 document.addEventListener('visibilitychange', () => { if (P && document.visibilityState === 'visible') requestWake(); });
 
 /* ---------------- dialogs (確認・アクションシート・トースト) ---------------- */
-function dialog({ title = '', msg = '', buttons = [] }) {
+function dialog({ title = '', msg = '', buttons = [], fields = [] }) {
   return new Promise(resolve => {
     const m = document.createElement('div');
     m.className = 'modal';
     m.innerHTML = `<div class="sheet card" role="dialog" aria-modal="true">
       ${title ? `<div class="sheet-title">${esc(title)}</div>` : ''}
       ${msg ? `<div class="sheet-msg">${esc(msg)}</div>` : ''}
+      ${fields.map(f => `<div class="field" style="margin:12px 0 0"><label>${esc(f.label)}</label>
+        <input class="input ${f.pin ? 'pin' : ''}" data-f="${f.key}" value="${esc(f.value || '')}" ${f.pin ? 'type="password" inputmode="numeric" maxlength="4" autocomplete="off"' : 'autocomplete="off"'}></div>`).join('')}
       <div class="sheet-btns">${buttons.map((b, i) => `<button class="btn ${b.style || ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>
     </div>`;
-    const close = v => { m.classList.add('out'); setTimeout(() => m.remove(), 150); resolve(v); };
+    const close = v => {
+      dialog.values = {};
+      m.querySelectorAll('[data-f]').forEach(i => { dialog.values[i.dataset.f] = i.value.trim(); });
+      m.classList.add('out'); setTimeout(() => m.remove(), 150); resolve(v);
+    };
     m.addEventListener('click', e => {
       const b = e.target.closest('[data-i]');
       if (b) close(buttons[+b.dataset.i].value);
       else if (e.target === m) close(null);
     });
     document.body.appendChild(m);
+    const first = m.querySelector('[data-f]'); if (first) setTimeout(() => first.focus(), 50);
   });
+}
+async function formDialog(title, fields, ok = '保存') {
+  const v = await dialog({ title, fields, buttons: [{ label: ok, value: true }, { label: 'キャンセル', value: false, style: 'white' }] });
+  return v === true ? dialog.values : null;
 }
 const confirmDlg = (title, msg, ok = 'OK', danger = false) =>
   dialog({ title, msg, buttons: [{ label: ok, value: true, style: danger ? 'danger' : '' }, { label: 'キャンセル', value: false, style: 'white' }] })
@@ -194,7 +280,11 @@ let E = null;   // editor state
 let P = null;   // player state
 
 function render() {
-  if (view === 'home') renderHome();
+  if (!session && view !== 'accounts') view = 'accounts';
+  if (view === 'accounts') renderAccounts();
+  else if (view === 'members') renderMembers();
+  else if (view === 'member') renderMember();
+  else if (view === 'home') renderHome();
   else if (view === 'editor') renderEditor();
   else if (view === 'history') renderHistory();
   else if (view === 'done') renderDone();
@@ -203,6 +293,7 @@ function render() {
 function nav(active) {
   return `<nav class="nav"><div class="nav-in">
     <button data-act="go-home" class="${active === 'home' ? 'on' : ''}"><span>🏠</span>ホーム</button>
+    <button data-act="go-members" class="${active === 'members' ? 'on' : ''}"><span>👥</span>みんな</button>
     <button data-act="go-history" class="${active === 'history' ? 'on' : ''}"><span>📅</span>記録</button>
   </div></nav>`;
 }
@@ -225,7 +316,7 @@ function renderHome() {
       <div class="prog-ic ${c}">${CAT[c].emoji}</div>
       <div class="prog-body">
         <div class="prog-name">${esc(p.name)}</div>
-        <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div>
+        <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}${p.from ? `・👤${esc(p.from.name)}` : ''}</div>
       </div>
       <button class="edit" data-act="more" data-id="${p.id}" aria-label="編集・削除">⋯</button>
       <div class="play">▶</div>
@@ -233,7 +324,8 @@ function renderHome() {
   }).join('') : `<div class="empty">メニューがありません。<br>右下の＋から作成しよう</div>`;
 
   app.innerHTML = `
-    <div class="top"><h1>🏸 バド基礎トレ</h1></div>
+    <div class="top"><h1>🏸 バド基礎トレ</h1>
+      ${online() ? `<button class="me-chip" data-act="switch-acct">${avatar(session, false, true)}${esc(session.name)} <span id="sync" class="sync">☁</span></button>` : `<button class="me-chip" data-act="switch-acct">アカウント</button>`}</div>
     <div class="card streak">
       <div class="flame ${doneToday ? 'on' : ''}">🔥</div>
       <div><div class="streak-num">${st}<small>日連続</small></div><div class="streak-msg">${msg}</div></div>
@@ -576,6 +668,8 @@ function renderHistory() {
         <div class="cal-head"><button data-act="cal" data-id="-1">‹</button>${y}年${m + 1}月<button data-act="cal" data-id="1">›</button></div>
         <div class="cal-grid">${cal}</div>
       </div>
+      <div class="sec-title">アカウント</div>
+      ${accountCard()}
       <div class="sec-title">設定</div>
       <div class="card switch"><b>音声ガイド</b>
         <button class="tab ${db.settings.voice ? 'on' : ''}" data-act="voice-set">${db.settings.voice ? 'ON' : 'OFF'}</button></div>
@@ -583,6 +677,223 @@ function renderHistory() {
       ${logs}
     </div>
     ${nav('history')}`;
+}
+
+/* ---------------- accounts (最初に選ぶだけ) ---------------- */
+let accts = lsGet('badtore.accts'), acctsErr = '', acctManage = false;
+async function loadAccounts() {
+  acctsErr = '';
+  try { accts = (await api('/api/users')).users; lsSet('badtore.accts', accts); }
+  catch (e) { acctsErr = e.message + (e.status >= 500 ? '\n（サーバーの準備ができていない可能性があります）' : ''); }
+  if (view === 'accounts') renderAccounts();
+}
+function renderAccounts() {
+  const list = accts || [];
+  app.innerHTML = `
+    <div class="acc">
+      <div class="login-hero"><img src="icon.svg" alt="" width="72" height="72"><h1>誰がトレーニングする？</h1>
+        <p class="muted">${acctManage ? '✎で名前変更、🗑で削除できます' : 'アカウントを選んでください'}</p></div>
+      ${acctsErr ? `<div class="err">${esc(acctsErr)}</div>` : ''}
+      <div class="acc-grid">
+        ${list.map(u => `<div class="acc-tile ${session && session.id === u.id ? 'cur' : ''} ${acctManage ? 'manage' : ''}" ${acctManage ? '' : `data-act="pick-acct" data-id="${esc(u.id)}"`}>
+          ${avatar(u, true)}
+          <div class="acc-name">${esc(u.name)}</div>
+          <div class="acc-sub">🔥${streak(new Set(u.summary.days))}・${u.summary.total}回</div>
+          ${acctManage ? `<div class="acc-ops"><button data-act="rename-acct" data-id="${esc(u.id)}" aria-label="名前を変更">✎</button><button data-act="del-acct" data-id="${esc(u.id)}" aria-label="削除">🗑</button></div>` : ''}
+        </div>`).join('')}
+        ${acctManage ? '' : `<button class="acc-tile add" data-act="add-acct"><div class="avatar big plus">＋</div><div class="acc-name">追加</div><div class="acc-sub">新しい人</div></button>`}
+      </div>
+      ${accts === null && !acctsErr ? '<div class="empty">読み込み中…</div>' : ''}
+      <div class="acc-foot">
+        ${list.length ? `<button class="btn ${acctManage ? '' : 'white'}" data-act="manage-acct">${acctManage ? '完了' : 'アカウントを管理'}</button>` : ''}
+        ${session ? `<button class="btn white" data-act="go-home">もどる</button>` : ''}
+        <button class="local-link" data-act="use-local">サーバーを使わず、この端末だけで使う</button>
+      </div>
+    </div>`;
+}
+function openAccounts() { acctManage = false; view = 'accounts'; render(); loadAccounts(); }
+async function pickAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  if (online()) await syncNow();
+  setSession({ id: u.id, name: u.name });
+  db = load(); view = 'home'; render();
+  toast(`${u.name}さんで始めます`);
+  pullFromServer();
+}
+async function addAccount() {
+  const v = await formDialog('アカウントを追加', [
+    { key: 'name', label: '名前（みんなに表示されます）' },
+    { key: 'id', label: 'ID（任意・半角英数字。空欄なら自動）' },
+  ], '追加する');
+  if (!v) return;
+  if (!v.name) { toast('名前を入力してください'); return; }
+  let data = seed();
+  const legacy = normalize(lsGet(KEY));
+  if (legacy && legacy.history.length && !lsGet('badtore.imported')) {
+    if (await confirmDlg('記録の引き継ぎ', `この端末にある記録（${legacy.history.length}回分）とメニューを「${v.name}」に引き継ぎますか？`, '引き継ぐ')) {
+      data = legacy; lsSet('badtore.imported', 1);
+    }
+  }
+  try {
+    const r = await api('/api/users', { method: 'POST', body: { name: v.name, id: v.id.toLowerCase(), data } });
+    accts = (accts || []).concat(r.user); lsSet('badtore.accts', accts);
+    lsSet(cacheKey(r.user.id), data);
+    await pickAccount(r.user.id);
+  } catch (e) { toast(e.message); }
+}
+async function renameAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  const v = await formDialog('名前を変更', [{ key: 'name', label: '名前', value: u.name }]);
+  if (!v || !v.name || v.name === u.name) return;
+  try {
+    await api(userUrl(id), { method: 'PUT', body: { name: v.name } });
+    u.name = v.name; lsSet('badtore.accts', accts);
+    if (session && session.id === id) { session.name = v.name; setSession(session); }
+    render(); toast('名前を変更しました');
+  } catch (e) { toast(e.message); }
+}
+async function deleteAccount(id) {
+  const u = (accts || []).find(x => x.id === id);
+  if (!u) return;
+  if (!(await confirmDlg('アカウントを削除', `「${u.name}」を削除しますか？\nメニューとトレーニング記録もすべて消え、元に戻せません。`, '削除する', true))) return;
+  try {
+    await api(userUrl(id), { method: 'DELETE' });
+    accts = accts.filter(x => x.id !== id); lsSet('badtore.accts', accts);
+    lsSet(cacheKey(id), null); lsSet(dirtyKey(id), null);
+    if (session && session.id === id) setSession(null);
+    if (!accts.length) acctManage = false;
+    render(); toast('削除しました');
+  } catch (e) { toast(e.message); }
+}
+function accountCard() {
+  if (online()) {
+    return `<div class="card acct">
+      ${avatar(session)}
+      <div style="flex:1;min-width:0"><b>${esc(session.name)}</b><div class="muted">@${esc(session.id)}</div></div>
+    </div>
+    <div class="acct-btns">
+      <button class="btn blue" data-act="switch-acct">アカウントを切り替え・管理</button>
+      <button class="btn white" data-act="rename-acct" data-id="${esc(session.id)}">名前を変更</button>
+    </div>`;
+  }
+  return `<div class="card acct"><div style="flex:1"><b>この端末だけで使っています</b>
+      <div class="muted">アカウントを選ぶと、みんなの記録を見たりメニューをもらえます。今の記録はアカウント追加のときに引き継げます。</div></div></div>
+    <div class="acct-btns"><button class="btn blue" data-act="switch-acct">アカウントを選ぶ</button></div>`;
+}
+
+/* ---------------- members ---------------- */
+let members = null, membersErr = '', memberQuery = '', member = null, memberOpen = {};
+const ago = t => {
+  if (!t) return 'まだ記録なし';
+  const d = Math.floor((Date.now() - t) / 86400000);
+  return d <= 0 ? '今日' : d === 1 ? '昨日' : `${d}日前`;
+};
+const avatar = (u, big, mini) => `<div class="avatar ${big ? 'big' : ''} ${mini ? 'mini' : ''}" style="background:hsl(${[...u.id].reduce((a, c) => a + c.charCodeAt(0), 0) * 37 % 360} 70% 55%)">${esc((u.name || u.id).slice(0, 1))}</div>`;
+
+async function loadMembers() {
+  membersErr = '';
+  try { members = (await api('/api/users')).users; }
+  catch (e) { membersErr = e.message; }
+  if (view === 'members') renderMemberList();
+}
+function renderMembers() {
+  if (!online()) {
+    app.innerHTML = `<div class="top"><h1>👥 みんな</h1></div>
+      <div class="wrap"><div class="card empty">アカウントを選ぶと、ほかの人のメニューや記録を見られます。
+        <div style="margin-top:16px"><button class="btn blue" data-act="switch-acct">アカウントを選ぶ</button></div></div></div>${nav('members')}`;
+    return;
+  }
+  app.innerHTML = `
+    <div class="top"><h1>👥 みんな</h1><button class="tab" data-act="reload-members">更新</button></div>
+    <div class="wrap">
+      <input id="m-q" class="input" placeholder="IDか名前で探す" value="${esc(memberQuery)}" autocapitalize="off">
+      <div id="m-list"></div>
+    </div>${nav('members')}`;
+  const qi = app.querySelector('#m-q');
+  qi.addEventListener('input', () => { memberQuery = qi.value; renderMemberList(); });
+  renderMemberList();
+}
+function renderMemberList() {
+  const box = document.getElementById('m-list');
+  if (!box) return;
+  const qq = memberQuery.trim().toLowerCase();
+  const list = (members || []).filter(u => !qq || u.id.includes(qq) || (u.name || '').toLowerCase().includes(qq));
+  const rows = list.map(u => {
+    const st = streak(new Set(u.summary.days));
+    return `<div class="card member" data-act="open-member" data-id="${esc(u.id)}">
+      ${avatar(u)}
+      <div class="prog-body"><div class="prog-name">${esc(u.name)} ${u.id === session.id ? '<span class="badge mix">あなた</span>' : ''}</div>
+        <div class="prog-meta">@${esc(u.id)}・合計${u.summary.total}回・最終 ${ago(u.summary.lastAt)}</div></div>
+      <div class="m-streak ${st ? '' : 'off'}">🔥${st}</div>
+    </div>`;
+  }).join('');
+  box.innerHTML = `
+      <div class="sec-title">メンバー${members ? `（${list.length}人）` : ''}</div>
+      ${membersErr ? `<div class="err">${esc(membersErr)}</div>` : ''}
+      ${members ? (rows || '<div class="empty">見つかりませんでした</div>') : (membersErr ? '' : '<div class="empty">読み込み中…</div>')}`;
+}
+async function openMember(id) {
+  member = { id, loading: true }; memberOpen = {};
+  view = 'member'; render();
+  try { member = await api('/api/users/' + encodeURIComponent(id)); }
+  catch (e) { member = { id, error: e.message }; }
+  if (view === 'member') renderMember();
+}
+function renderMember() {
+  const back = `<div class="top"><button class="x" data-act="go-members" aria-label="戻る">‹</button><h1>メンバー</h1><div style="width:40px"></div></div>`;
+  if (!member || member.loading || member.error) {
+    app.innerHTML = back + `<div class="wrap"><div class="${member && member.error ? 'err' : 'empty'}">${esc(member && member.error ? member.error : '読み込み中…')}</div></div>${nav('members')}`;
+    return;
+  }
+  const u = member.user, days = new Set(u.summary.days), me = u.id === session.id;
+  const W = '日月火水木金土', today = new Date();
+  let week = '';
+  for (let i = 6; i >= 0; i--) {
+    const d = addDays(today, -i), on = days.has(dayKey(d));
+    week += `<div class="day">${W[d.getDay()]}<div class="dot ${on ? 'on' : ''} ${i === 0 ? 'today' : ''}">${on ? '✓' : ''}</div></div>`;
+  }
+  const progs = member.programs.map(p => {
+    const c = progCat(p), open = memberOpen[p.id];
+    return `<div class="card mprog">
+      <div class="mprog-head" data-act="toggle-mprog" data-id="${esc(p.id)}">
+        <div class="prog-ic ${c}">${CAT[c].emoji}</div>
+        <div class="prog-body"><div class="prog-name">${esc(p.name)}</div>
+          <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div></div>
+        <div class="chev">${open ? '▲' : '▼'}</div>
+      </div>
+      ${open ? `<ol class="mitems">${p.items.map(i => `<li><span class="badge ${i.category}">${CAT[i.category].label}</span> ${esc(i.name)} <b>${i.sec}秒</b>${i.interval ? `<span class="muted">（休${i.interval}秒）</span>` : ''}</li>`).join('')}</ol>` : ''}
+      ${me ? '' : `<button class="btn blue small" data-act="copy-prog" data-id="${esc(p.id)}">＋ 自分のメニューに追加</button>`}
+    </div>`;
+  }).join('') || '<div class="empty">メニューはありません</div>';
+  const logs = member.history.slice().reverse().slice(0, 30).map(h => {
+    const dt = new Date(h.at);
+    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目</div></div>
+      <div class="muted">${fmt(h.sec || 0)}</div></div>`;
+  }).join('') || '<div class="empty">まだ記録がありません</div>';
+  app.innerHTML = back + `
+    <div class="wrap">
+      <div class="card profile">${avatar(u, true)}<div><div class="p-name">${esc(u.name)} ${me ? '<span class="badge mix">あなた</span>' : ''}</div><div class="muted">@${esc(u.id)}</div></div></div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="card tile"><div class="v" style="color:var(--orange)">🔥 ${streak(days)}</div><div class="k">現在の連続日数</div></div>
+        <div class="card tile"><div class="v">🏆 ${bestStreak(days)}</div><div class="k">最高連続日数</div></div>
+        <div class="card tile"><div class="v">${u.summary.total}</div><div class="k">合計トレーニング回数</div></div>
+        <div class="card tile"><div class="v">${Math.round(u.summary.totalSec / 60)}<small style="font-size:14px">分</small></div><div class="k">合計時間</div></div>
+      </div>
+      <div class="card week" style="margin:12px 0 0">${week}</div>
+      <div class="sec-title">メニュー（${member.programs.length}）</div>
+      ${progs}
+      <div class="sec-title">最近の記録</div>
+      ${logs}
+    </div>${nav('members')}`;
+}
+async function copyProgram(pid) {
+  const p = member.programs.find(x => x.id === pid);
+  if (!p) return;
+  if (!(await confirmDlg('自分のメニューに追加', `${member.user.name}さんの「${p.name}」（${p.items.length}種目）を自分のメニューに追加しますか？`, '追加する'))) return;
+  db.programs.unshift({ id: uid(), name: p.name, items: p.items.map(i => ({ ...i, id: uid() })), from: { id: member.user.id, name: member.user.name } });
+  save(); toast(`「${p.name}」を追加しました`);
 }
 
 /* ---------------- events ---------------- */
@@ -594,6 +905,20 @@ app.addEventListener('click', e => {
   switch (act) {
     case 'go-home': view = 'home'; render(); break;
     case 'go-history': view = 'history'; render(); break;
+    case 'go-members': view = 'members'; render(); if (online()) loadMembers(); break;
+    case 'reload-members': members = null; renderMemberList(); loadMembers(); break;
+    case 'open-member': openMember(id); break;
+    case 'toggle-mprog': memberOpen[id] = !memberOpen[id]; { const y = window.scrollY; renderMember(); window.scrollTo(0, y); } break;
+    case 'copy-prog': copyProgram(id); break;
+    case 'switch-acct': openAccounts(); break;
+    case 'pick-acct': pickAccount(id); break;
+    case 'add-acct': addAccount(); break;
+    case 'rename-acct': renameAccount(id); break;
+    case 'del-acct': deleteAccount(id); break;
+    case 'manage-acct': acctManage = !acctManage; renderAccounts(); break;
+    case 'use-local':
+      (online() ? syncNow() : Promise.resolve()).then(() => { setSession({ local: true }); db = load(); view = 'home'; render(); });
+      break;
     case 'filter': homeFilter = id; render(); break;
     case 'start': startProgram(id); break;
     case 'edit': openEditor(id); break;
@@ -646,7 +971,10 @@ app.addEventListener('click', e => {
   }
 });
 
+if (!session) view = 'accounts';
 render();
+if (!session) loadAccounts();
+pullFromServer();
 
 /* ---------------- PWA ---------------- */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !window.__NO_SW__) {
