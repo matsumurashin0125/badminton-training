@@ -1,5 +1,5 @@
 // オフラインでも使えるようにアプリ本体をキャッシュ（更新時は VERSION を上げる）
-const VERSION = 'badtore-v1';
+const VERSION = 'badtore-v2';
 const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));

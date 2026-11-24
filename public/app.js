@@ -123,6 +123,70 @@ async function requestWake() { try { if ('wakeLock' in navigator) wakeLock = awa
 function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
 document.addEventListener('visibilitychange', () => { if (P && document.visibilityState === 'visible') requestWake(); });
 
+/* ---------------- dialogs (確認・アクションシート・トースト) ---------------- */
+function dialog({ title = '', msg = '', buttons = [] }) {
+  return new Promise(resolve => {
+    const m = document.createElement('div');
+    m.className = 'modal';
+    m.innerHTML = `<div class="sheet card" role="dialog" aria-modal="true">
+      ${title ? `<div class="sheet-title">${esc(title)}</div>` : ''}
+      ${msg ? `<div class="sheet-msg">${esc(msg)}</div>` : ''}
+      <div class="sheet-btns">${buttons.map((b, i) => `<button class="btn ${b.style || ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>
+    </div>`;
+    const close = v => { m.classList.add('out'); setTimeout(() => m.remove(), 150); resolve(v); };
+    m.addEventListener('click', e => {
+      const b = e.target.closest('[data-i]');
+      if (b) close(buttons[+b.dataset.i].value);
+      else if (e.target === m) close(null);
+    });
+    document.body.appendChild(m);
+  });
+}
+const confirmDlg = (title, msg, ok = 'OK', danger = false) =>
+  dialog({ title, msg, buttons: [{ label: ok, value: true, style: danger ? 'danger' : '' }, { label: 'キャンセル', value: false, style: 'white' }] })
+    .then(v => v === true);
+function toast(text) {
+  let t = document.getElementById('toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = text; t.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+/* ---------------- program actions ---------------- */
+async function programMenu(id) {
+  const p = db.programs.find(x => x.id === id);
+  if (!p) return;
+  const v = await dialog({
+    title: p.name,
+    msg: `${p.items.length}種目・約${fmt(totalSec(p))}`,
+    buttons: [
+      { label: '▶ 開始', value: 'start' },
+      { label: '✎ 編集', value: 'edit', style: 'blue' },
+      { label: '⧉ 複製', value: 'dup', style: 'white' },
+      { label: '🗑 削除', value: 'del', style: 'red' },
+      { label: '閉じる', value: null, style: 'ghost' },
+    ],
+  });
+  if (v === 'start') startProgram(id);
+  else if (v === 'edit') openEditor(id);
+  else if (v === 'dup') duplicateProgram(id);
+  else if (v === 'del') { if (await deleteProgram(id)) render(); }
+}
+function duplicateProgram(id) {
+  const p = db.programs.find(x => x.id === id);
+  const copy = { id: uid(), name: p.name + '（コピー）', items: p.items.map(i => ({ ...i, id: uid() })) };
+  db.programs.splice(db.programs.indexOf(p) + 1, 0, copy);
+  save(); render(); toast('複製しました');
+}
+async function deleteProgram(id) {
+  const p = db.programs.find(x => x.id === id);
+  if (!p) return false;
+  if (!(await confirmDlg('メニューを削除', `「${p.name}」を削除しますか？\n（これまでの記録は残ります）`, '削除する', true))) return false;
+  db.programs = db.programs.filter(x => x.id !== id);
+  save(); toast('削除しました');
+  return true;
+}
+
 /* ---------------- router ---------------- */
 const app = document.getElementById('app');
 let view = 'home', homeFilter = 'all', calMonth = new Date(), lastDone = null;
@@ -163,7 +227,7 @@ function renderHome() {
         <div class="prog-name">${esc(p.name)}</div>
         <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div>
       </div>
-      <button class="edit" data-act="edit" data-id="${p.id}" aria-label="編集">✎</button>
+      <button class="edit" data-act="more" data-id="${p.id}" aria-label="編集・削除">⋯</button>
       <div class="play">▶</div>
     </div>`;
   }).join('') : `<div class="empty">メニューがありません。<br>右下の＋から作成しよう</div>`;
@@ -192,10 +256,12 @@ function openEditor(id) {
     id: p ? p.id : null,
     name: p ? p.name : '',
     items: p ? p.items.map(i => ({ ...i })) : [],
-    form: { category: p && p.items.length ? p.items[p.items.length - 1].category : 'core', name: '', sec: 30, useInt: true, intSec: 15 },
+    form: blankForm(p && p.items.length ? p.items[p.items.length - 1].category : 'core'),
+    editIndex: null,   // 種目を編集中ならその番号
   };
   view = 'editor'; render();
 }
+function blankForm(category = 'core') { return { category, name: '', sec: 30, useInt: true, intSec: 15 }; }
 function readForm() {
   const f = E.form;
   const q = s => app.querySelector(s);
@@ -206,13 +272,16 @@ function readForm() {
 }
 function renderEditor() {
   const f = E.form;
+  const editing = E.editIndex !== null;
   const items = E.items.map((it, i) => `
-    <div class="card item">
+    <div class="card item ${E.editIndex === i ? 'editing' : ''}" data-act="edit-item" data-id="${i}">
       <div class="item-n">${i + 1}</div>
       <div class="item-body"><div class="item-name">${esc(it.name)}</div>
-        <div class="item-sub"><span class="badge ${it.category}">${CAT[it.category].label}</span>　${it.sec}秒</div></div>
-      <button data-act="up" data-id="${i}" aria-label="上へ">▲</button>
-      <button data-act="del-item" data-id="${i}" aria-label="削除">✕</button>
+        <div class="item-sub"><span class="badge ${it.category}">${CAT[it.category].label}</span>　${it.sec}秒${E.editIndex === i ? '　<b class="edit-tag">編集中</b>' : ''}</div></div>
+      <button data-act="edit-item" data-id="${i}" aria-label="編集">✎</button>
+      <button data-act="up" data-id="${i}" aria-label="上へ" ${i === 0 ? 'disabled' : ''}>▲</button>
+      <button data-act="down" data-id="${i}" aria-label="下へ" ${i === E.items.length - 1 ? 'disabled' : ''}>▼</button>
+      <button data-act="del-item" data-id="${i}" aria-label="削除">🗑</button>
     </div>
     ${i < E.items.length - 1 ? `<div class="int-line">${it.interval ? `⏸ インターバル ${it.interval}秒` : `⏱ 準備 ${PREP_SEC}秒`}</div>` : ''}`).join('');
 
@@ -223,10 +292,10 @@ function renderEditor() {
       <div class="field"><label>トレーニング名</label>
         <input id="p-name" class="input" placeholder="例：朝の体幹セット" value="${esc(E.name)}"></div>
 
-      ${E.items.length ? `<div class="sec-title">追加済み（${E.items.length}種目）</div><div class="items">${items}</div>` : ''}
+      ${E.items.length ? `<div class="sec-title">追加済み（${E.items.length}種目）<span class="muted">タップで編集</span></div><div class="items">${items}</div>` : ''}
 
-      <div class="sec-title">${E.items.length ? '次のメニュー' : '1つ目のメニュー'}</div>
-      <div class="card form-box">
+      <div class="sec-title" id="form-title">${editing ? `${E.editIndex + 1}番目のメニューを編集` : E.items.length ? '次のメニュー' : '1つ目のメニュー'}</div>
+      <div class="card form-box ${editing ? 'editing' : ''}">
         <div class="field"><label>種類</label>
           <div class="seg">
             <button class="core ${f.category === 'core' ? 'on' : ''}" data-act="cat" data-id="core">🧘 体幹</button>
@@ -256,7 +325,10 @@ function renderEditor() {
       </div>
 
       <div class="actions">
-        <button class="btn blue" data-act="add-next">＋ 次のメニューを追加</button>
+        ${editing
+          ? `<button class="btn blue" data-act="update-item">✓ この種目を更新</button>
+             <button class="btn white" data-act="cancel-item">編集をやめる</button>`
+          : `<button class="btn blue" data-act="add-next">＋ 次のメニューを追加</button>`}
         <button class="btn" data-act="finish-edit">終了して保存</button>
         ${E.id ? `<button class="btn red" data-act="del-prog">このトレーニングを削除</button>` : ''}
       </div>
@@ -270,16 +342,49 @@ function formToItem() {
 }
 function addNext() {
   const it = formToItem();
-  if (!it) { alert('メニュー名と秒数を入力してください'); return; }
+  if (!it) { toast('メニュー名と秒数を入力してください'); return; }
   E.items.push(it);
   E.form.name = '';
   render();
   setTimeout(() => { const el = document.querySelector('#f-name'); el && el.scrollIntoView({ block: 'center' }); }, 50);
 }
-function finishEdit() {
+function startEditItem(i) {
+  readForm();
+  const it = E.items[i];
+  E.editIndex = i;
+  E.form = { category: it.category, name: it.name, sec: it.sec, useInt: it.interval > 0, intSec: it.interval || 15 };
+  render();
+  setTimeout(() => { const el = document.getElementById('form-title'); el && el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
+}
+function updateItem() {
   const it = formToItem();
-  if (it) E.items.push(it);
-  if (!E.items.length) { alert('メニューを1つ以上追加してください'); return; }
+  if (!it) { toast('メニュー名と秒数を入力してください'); return false; }
+  it.id = E.items[E.editIndex].id;
+  E.items[E.editIndex] = it;
+  E.editIndex = null; E.form = blankForm(it.category);
+  return true;
+}
+function cancelItem() { readForm(); E.editIndex = null; E.form = blankForm(E.form.category); render(); }
+function moveItem(i, d) {
+  readForm();
+  const j = i + d;
+  if (j < 0 || j >= E.items.length) return;
+  [E.items[i], E.items[j]] = [E.items[j], E.items[i]];
+  if (E.editIndex === i) E.editIndex = j; else if (E.editIndex === j) E.editIndex = i;
+  render();
+}
+async function deleteItem(i) {
+  readForm();
+  if (!(await confirmDlg('種目を削除', `「${E.items[i].name}」をこのトレーニングから削除しますか？`, '削除する', true))) return;
+  E.items.splice(i, 1);
+  if (E.editIndex === i) { E.editIndex = null; E.form = blankForm(E.form.category); }
+  else if (E.editIndex !== null && E.editIndex > i) E.editIndex--;
+  render();
+}
+function finishEdit() {
+  if (E.editIndex !== null) { if (!updateItem()) return; }
+  else { const it = formToItem(); if (it) E.items.push(it); }
+  if (!E.items.length) { toast('メニューを1つ以上追加してください'); return; }
   const d = new Date();
   const name = E.name || `トレーニング ${d.getMonth() + 1}/${d.getDate()}`;
   if (E.id) {
@@ -454,7 +559,7 @@ function renderHistory() {
   const logs = db.history.slice().reverse().slice(0, 50).map(h => {
     const dt = new Date(h.at);
     return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目</div></div>
-      <div class="muted">${fmt(h.sec || 0)}</div></div>`;
+      <div class="log-r"><span class="muted">${fmt(h.sec || 0)}</span><button class="log-del" data-act="del-log" data-id="${h.id}" aria-label="記録を削除">🗑</button></div></div>`;
   }).join('') || '<div class="empty">まだ記録がありません</div>';
 
   app.innerHTML = `
@@ -492,6 +597,7 @@ app.addEventListener('click', e => {
     case 'filter': homeFilter = id; render(); break;
     case 'start': startProgram(id); break;
     case 'edit': openEditor(id); break;
+    case 'more': programMenu(id); break;
     case 'new': openEditor(null); break;
     // editor
     case 'cat': readForm(); E.form.category = id; render(); break;
@@ -503,24 +609,39 @@ app.addEventListener('click', e => {
     case 'int': readForm(); E.form.useInt = id === '1'; render(); break;
     case 'add-next': addNext(); break;
     case 'finish-edit': finishEdit(); break;
-    case 'up': readForm(); { const i = +id; if (i > 0) [E.items[i - 1], E.items[i]] = [E.items[i], E.items[i - 1]]; } render(); break;
-    case 'del-item': readForm(); E.items.splice(+id, 1); render(); break;
-    case 'cancel-edit': if (confirm('保存せずに戻りますか？')) { E = null; view = 'home'; render(); } break;
+    case 'edit-item': startEditItem(+id); break;
+    case 'update-item': if (updateItem()) { render(); toast('更新しました'); } break;
+    case 'cancel-item': cancelItem(); break;
+    case 'up': moveItem(+id, -1); break;
+    case 'down': moveItem(+id, 1); break;
+    case 'del-item': deleteItem(+id); break;
+    case 'cancel-edit':
+      confirmDlg('編集をやめる', '保存せずにホームに戻りますか？', '戻る').then(ok => { if (ok) { E = null; view = 'home'; render(); } });
+      break;
     case 'del-prog':
-      if (confirm('このトレーニングを削除しますか？（記録は残ります）')) {
-        db.programs = db.programs.filter(p => p.id !== E.id); save(); E = null; view = 'home'; render();
-      } break;
+      deleteProgram(E.id).then(ok => { if (ok) { E = null; view = 'home'; render(); } });
+      break;
     // player
     case 'pause': togglePause(); break;
     case 'skip': if (P && !P.paused) nextPhase(); break;
     case 'quit':
-      if (confirm('トレーニングを中止しますか？（記録は残りません）')) { stopPlayer(); view = 'home'; render(); }
+      if (P && !P.paused) togglePause();
+      confirmDlg('トレーニングを中止', '中止しますか？（記録は残りません）', '中止する', true)
+        .then(ok => { if (ok) { stopPlayer(); view = 'home'; render(); } else if (P && P.paused) togglePause(); });
       break;
     case 'voice':
       db.settings.voice = !db.settings.voice; save();
       if (!db.settings.voice) try { speechSynthesis.cancel(); } catch (er) {}
       t.textContent = db.settings.voice ? '🔊' : '🔇'; break;
     case 'voice-set': db.settings.voice = !db.settings.voice; save(); render(); break;
+    case 'del-log': {
+      const h = db.history.find(x => x.id === id);
+      if (!h) break;
+      const dt = new Date(h.at);
+      confirmDlg('記録を削除', `${dt.getMonth() + 1}/${dt.getDate()}「${h.name}」の記録を削除しますか？\n連続日数にも反映されます。`, '削除する', true)
+        .then(ok => { if (ok) { db.history = db.history.filter(x => x.id !== id); save(); render(); toast('記録を削除しました'); } });
+      break;
+    }
     case 'cal': calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + +id, 1); render(); break;
   }
 });
