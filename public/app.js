@@ -1,6 +1,6 @@
 'use strict';
 /* =========================================================
-   KOSO REN BASE — バドミントン基礎トレのカウントダウン＆記録アプリ
+   KOSO REN TRAINING — バドミントン基礎トレのカウントダウン＆記録アプリ
    アカウントを選ぶとサーバー(Cloud Storage)に同期、選ばなければ端末だけに保存
    ========================================================= */
 
@@ -324,8 +324,8 @@ function renderHome() {
   }).join('') : `<div class="empty">メニューがありません。<br>右下の＋から作成しよう</div>`;
 
   app.innerHTML = `
-    <div class="top"><h1 class="brand"><img src="icon-192.png" alt="" width="34" height="34">KOSO REN <span>BASE</span></h1>
-      ${online() ? `<button class="me-chip" data-act="switch-acct">${avatar(session, false, true)}${esc(session.name)} <span id="sync" class="sync">☁</span></button>` : `<button class="me-chip" data-act="switch-acct">アカウント</button>`}</div>
+    <div class="top"><h1 class="brand"><img src="icon-192.png" alt="" width="34" height="34">KOSO REN <span>TRAINING</span></h1>
+      ${online() ? `<button class="me-chip" data-act="switch-acct" aria-label="${esc(session.name)}（アカウント切り替え）">${avatar(session, false, true)}<span class="chip-name">${esc(session.name)}</span><span id="sync" class="sync">☁</span></button>` : `<button class="me-chip" data-act="switch-acct">アカウント</button>`}</div>
     <div class="card streak">
       <div class="flame ${doneToday ? 'on' : ''}">🔥</div>
       <div><div class="streak-num">${st}<small>日連続</small></div><div class="streak-msg">${msg}</div></div>
@@ -691,7 +691,7 @@ function renderAccounts() {
   const list = accts || [];
   app.innerHTML = `
     <div class="acc">
-      <div class="login-hero"><img src="icon-192.png" alt="KOSO REN BASE" width="96" height="96"><h1>誰がトレーニングする？</h1>
+      <div class="login-hero"><img src="icon-192.png" alt="KOSO REN TRAINING" width="96" height="96"><h1>誰がトレーニングする？</h1>
         <p class="muted">${acctManage ? '✎で名前変更、🗑で削除できます' : 'アカウントを選んでください'}</p></div>
       ${acctsErr ? `<div class="err">${esc(acctsErr)}</div>` : ''}
       <div class="acc-grid">
