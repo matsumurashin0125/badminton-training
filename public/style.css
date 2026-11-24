@@ -211,7 +211,12 @@ input{font:inherit}
 @keyframes wiggle{25%{transform:rotate(-1.5deg)}75%{transform:rotate(1.5deg)}}
 
 /* ---------- brand ---------- */
-.brand{display:flex;align-items:center;gap:8px;letter-spacing:.02em}
+.brand{display:flex;align-items:center;gap:8px;letter-spacing:.02em;font-size:clamp(14px,4.3vw,18px);white-space:nowrap;min-width:0}
+.top{gap:8px}
+.top h1.brand{font-size:clamp(14px,4.2vw,18px);flex:1 1 auto;overflow:hidden}
+.me-chip{flex:0 0 auto;min-width:0;max-width:38%}
+.chip-name{overflow:hidden;text-overflow:ellipsis}
+@media(max-width:440px){.chip-name{display:none}}
 .brand img{border-radius:9px}
 .brand span{color:var(--green-d)}
 .login-hero img{border-radius:22px;box-shadow:none}
