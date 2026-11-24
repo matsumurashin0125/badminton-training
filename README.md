@@ -1,4 +1,6 @@
-# 🏸 バド基礎トレ
+# KOSO REN BASE
+
+<img src="public/icon-512.png" width="160" alt="KOSO REN BASE アイコン">
 
 バドミントンの基礎トレ（体幹・フットワーク）を音声カウントダウンで実施し、記録と連続日数（🔥ストリーク）を残す Web アプリ（PWA）です。
 GitHub に push すると Cloud Run に自動デプロイされます。
