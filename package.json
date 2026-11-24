@@ -1,0 +1,15 @@
+{
+  "name": "badminton-training",
+  "version": "2.0.0",
+  "private": true,
+  "description": "バドミントン基礎トレ カウントダウン＆記録アプリ",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "STORE=file node server.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0"
+  }
+}

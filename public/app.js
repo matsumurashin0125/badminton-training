@@ -1,10 +1,11 @@
 'use strict';
 /* =========================================================
    バド基礎トレ  — カウントダウン式トレーニング記録アプリ
-   データは端末のブラウザ(localStorage)に保存されます
+   ログインするとサーバー(Firestore)に同期、未ログインなら端末だけに保存
    ========================================================= */
 
-const KEY = 'badtore.v1';
+const KEY = 'badtore.v1';                 // ログインなし（この端末のみ）で使うときの保存先
+const SESSION_KEY = 'badtore.session';    // { token, id, name } または { local: true }
 const PREP_SEC = 5;          // 開始前カウント
 const REST_COUNT_FROM = 5;   // インターバル残り何秒から音声カウントするか
 const WORK_COUNT_FROM = 3;   // トレーニング残り何秒から音声カウントするか
@@ -38,36 +39,103 @@ function seed() {
     ],
   };
 }
-function load() {
-  try {
-    const d = JSON.parse(localStorage.getItem(KEY));
-    if (d && Array.isArray(d.programs)) {
-      d.settings = Object.assign({ voice: true }, d.settings);
-      d.history = d.history || [];
-      return d;
-    }
-  } catch (e) {}
-  return seed();
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+let session = lsGet(SESSION_KEY);   // null = 未選択（ログイン画面を出す）
+const online = () => !!(session && session.token);
+const cacheKey = () => online() ? `badtore.u.${session.id}` : KEY;
+const dirtyKey = () => `badtore.dirty.${session.id}`;
+
+function normalize(d) {
+  if (!d || !Array.isArray(d.programs)) return null;
+  return { programs: d.programs, history: Array.isArray(d.history) ? d.history : [], settings: Object.assign({ voice: true }, d.settings) };
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} }
+function load() { return normalize(lsGet(cacheKey())) || seed(); }
+function save() {
+  lsSet(cacheKey(), db);
+  if (online()) { lsSet(dirtyKey(), 1); scheduleSync(); }
+}
 let db = load();
-save();
+
+/* ---------------- server API / 同期 ---------------- */
+async function api(path, opt = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opt.method || 'GET',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, session && session.token ? { Authorization: 'Bearer ' + session.token } : {}),
+      body: opt.body ? JSON.stringify(opt.body) : undefined,
+    });
+  } catch (e) { const er = new Error('通信できませんでした。電波の良いところで試してください'); er.offline = true; throw er; }
+  let json = {};
+  try { json = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    const er = new Error(json.error || `エラーが発生しました (${res.status})`); er.status = res.status;
+    if (res.status === 401 && online() && !opt.noLogout) { forceLogout(); }
+    throw er;
+  }
+  return json;
+}
+let syncTimer = null, syncing = false;
+function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 800); }
+async function syncNow() {
+  if (!online() || syncing || !lsGet(dirtyKey())) return;
+  syncing = true; setSync('…');
+  const snapshot = JSON.stringify(db);
+  try {
+    await api('/api/me/data', { method: 'PUT', body: db });
+    if (JSON.stringify(db) === snapshot) lsSet(dirtyKey(), null);   // 送信中の変更がなければ同期完了
+    setSync('ok');
+  } catch (e) { setSync('err'); }
+  syncing = false;
+  if (online() && lsGet(dirtyKey()) && navigator.onLine !== false) scheduleSync();
+}
+function setSync(st) {
+  const el = document.getElementById('sync');
+  if (!el) return;
+  el.textContent = st === 'ok' ? '☁ 同期済み' : st === 'err' ? '⚠ 未同期' : '☁ 同期中…';
+  el.className = 'sync ' + st;
+}
+window.addEventListener('online', syncNow);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
+
+async function pullFromServer() {
+  if (!online()) return;
+  try {
+    if (lsGet(dirtyKey())) { await syncNow(); return; }   // 未送信の変更があれば先に送る
+    const r = await api('/api/me');
+    session.name = r.user.name; lsSet(SESSION_KEY, session);
+    db = normalize(r.data) || seed();
+    lsSet(cacheKey(), db);
+    if (view === 'home' || view === 'history') render();
+    setSync('ok');
+  } catch (e) { setSync('err'); }
+}
+function setSession(s) {
+  session = s; lsSet(SESSION_KEY, s);
+}
+function forceLogout(msg) {
+  stopPlayer && P && stopPlayer();
+  setSession(null);
+  view = 'login'; render();
+  toast(msg || 'もう一度ログインしてください');
+}
 
 /* ---------------- dates / streak ---------------- */
 const pad = n => String(n).padStart(2, '0');
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const doneDays = () => new Set(db.history.map(h => h.day));
-function streak() {
-  const s = doneDays();
+function streak(s = doneDays()) {
   let d = new Date();
   if (!s.has(dayKey(d))) d = addDays(d, -1);   // 今日まだでも昨日までの連続は維持
   let n = 0;
   while (s.has(dayKey(d))) { n++; d = addDays(d, -1); }
   return n;
 }
-function bestStreak() {
-  const days = [...doneDays()].sort();
+function bestStreak(set = doneDays()) {
+  const days = [...set].sort();
   let best = 0, cur = 0, prev = null;
   for (const k of days) {
     cur = (prev && dayKey(addDays(prev, 1)) === k) ? cur + 1 : 1;
@@ -124,23 +192,34 @@ function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wa
 document.addEventListener('visibilitychange', () => { if (P && document.visibilityState === 'visible') requestWake(); });
 
 /* ---------------- dialogs (確認・アクションシート・トースト) ---------------- */
-function dialog({ title = '', msg = '', buttons = [] }) {
+function dialog({ title = '', msg = '', buttons = [], fields = [] }) {
   return new Promise(resolve => {
     const m = document.createElement('div');
     m.className = 'modal';
     m.innerHTML = `<div class="sheet card" role="dialog" aria-modal="true">
       ${title ? `<div class="sheet-title">${esc(title)}</div>` : ''}
       ${msg ? `<div class="sheet-msg">${esc(msg)}</div>` : ''}
+      ${fields.map(f => `<div class="field" style="margin:12px 0 0"><label>${esc(f.label)}</label>
+        <input class="input ${f.pin ? 'pin' : ''}" data-f="${f.key}" value="${esc(f.value || '')}" ${f.pin ? 'type="password" inputmode="numeric" maxlength="4" autocomplete="off"' : 'autocomplete="off"'}></div>`).join('')}
       <div class="sheet-btns">${buttons.map((b, i) => `<button class="btn ${b.style || ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>
     </div>`;
-    const close = v => { m.classList.add('out'); setTimeout(() => m.remove(), 150); resolve(v); };
+    const close = v => {
+      dialog.values = {};
+      m.querySelectorAll('[data-f]').forEach(i => { dialog.values[i.dataset.f] = i.value.trim(); });
+      m.classList.add('out'); setTimeout(() => m.remove(), 150); resolve(v);
+    };
     m.addEventListener('click', e => {
       const b = e.target.closest('[data-i]');
       if (b) close(buttons[+b.dataset.i].value);
       else if (e.target === m) close(null);
     });
     document.body.appendChild(m);
+    const first = m.querySelector('[data-f]'); if (first) setTimeout(() => first.focus(), 50);
   });
+}
+async function formDialog(title, fields, ok = '保存') {
+  const v = await dialog({ title, fields, buttons: [{ label: ok, value: true }, { label: 'キャンセル', value: false, style: 'white' }] });
+  return v === true ? dialog.values : null;
 }
 const confirmDlg = (title, msg, ok = 'OK', danger = false) =>
   dialog({ title, msg, buttons: [{ label: ok, value: true, style: danger ? 'danger' : '' }, { label: 'キャンセル', value: false, style: 'white' }] })
@@ -194,7 +273,11 @@ let E = null;   // editor state
 let P = null;   // player state
 
 function render() {
-  if (view === 'home') renderHome();
+  if (!session && view !== 'login') view = 'login';
+  if (view === 'login') renderLogin();
+  else if (view === 'members') renderMembers();
+  else if (view === 'member') renderMember();
+  else if (view === 'home') renderHome();
   else if (view === 'editor') renderEditor();
   else if (view === 'history') renderHistory();
   else if (view === 'done') renderDone();
@@ -203,6 +286,7 @@ function render() {
 function nav(active) {
   return `<nav class="nav"><div class="nav-in">
     <button data-act="go-home" class="${active === 'home' ? 'on' : ''}"><span>🏠</span>ホーム</button>
+    <button data-act="go-members" class="${active === 'members' ? 'on' : ''}"><span>👥</span>みんな</button>
     <button data-act="go-history" class="${active === 'history' ? 'on' : ''}"><span>📅</span>記録</button>
   </div></nav>`;
 }
@@ -225,7 +309,7 @@ function renderHome() {
       <div class="prog-ic ${c}">${CAT[c].emoji}</div>
       <div class="prog-body">
         <div class="prog-name">${esc(p.name)}</div>
-        <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div>
+        <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}${p.from ? `・👤${esc(p.from.name)}` : ''}</div>
       </div>
       <button class="edit" data-act="more" data-id="${p.id}" aria-label="編集・削除">⋯</button>
       <div class="play">▶</div>
@@ -233,7 +317,8 @@ function renderHome() {
   }).join('') : `<div class="empty">メニューがありません。<br>右下の＋から作成しよう</div>`;
 
   app.innerHTML = `
-    <div class="top"><h1>🏸 バド基礎トレ</h1></div>
+    <div class="top"><h1>🏸 バド基礎トレ</h1>
+      ${online() ? `<button class="me-chip" data-act="go-history"><span id="sync" class="sync">☁</span> ${esc(session.name)}</button>` : `<button class="me-chip" data-act="to-login">ログイン</button>`}</div>
     <div class="card streak">
       <div class="flame ${doneToday ? 'on' : ''}">🔥</div>
       <div><div class="streak-num">${st}<small>日連続</small></div><div class="streak-msg">${msg}</div></div>
@@ -576,6 +661,8 @@ function renderHistory() {
         <div class="cal-head"><button data-act="cal" data-id="-1">‹</button>${y}年${m + 1}月<button data-act="cal" data-id="1">›</button></div>
         <div class="cal-grid">${cal}</div>
       </div>
+      <div class="sec-title">アカウント</div>
+      ${accountCard()}
       <div class="sec-title">設定</div>
       <div class="card switch"><b>音声ガイド</b>
         <button class="tab ${db.settings.voice ? 'on' : ''}" data-act="voice-set">${db.settings.voice ? 'ON' : 'OFF'}</button></div>
@@ -583,6 +670,224 @@ function renderHistory() {
       ${logs}
     </div>
     ${nav('history')}`;
+}
+
+/* ---------------- login ---------------- */
+let loginTab = 'login', loginErr = '', loginBusy = false, loginId = null, loginName = '';
+function renderLogin() {
+  const local = normalize(lsGet(KEY));
+  const hasLocal = local && local.history.length > 0;
+  const reg = loginTab === 'register';
+  app.innerHTML = `
+    <div class="login">
+      <div class="login-hero"><img src="icon.svg" alt="" width="84" height="84"><h1>バド基礎トレ</h1>
+        <p class="muted">IDと数字4桁のパスワードでログイン</p></div>
+      <div class="seg" style="margin-bottom:18px">
+        <button class="plain ${!reg ? 'on' : ''}" data-act="login-tab" data-id="login">ログイン</button>
+        <button class="plain ${reg ? 'on' : ''}" data-act="login-tab" data-id="register">新規登録</button>
+      </div>
+      <form id="login-form" class="card form-box" autocomplete="off">
+        <div class="field"><label>ユーザーID（半角英数字 3〜20文字）</label>
+          <input id="l-id" class="input" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="例：shin" value="${esc(loginId != null ? loginId : (lsGet('badtore.lastId') || ''))}"></div>
+        ${reg ? `<div class="field"><label>表示名（みんなに見える名前）</label>
+          <input id="l-name" class="input" placeholder="例：しん" value="${esc(loginName)}"></div>` : ''}
+        <div class="field"><label>パスワード（数字4桁）</label>
+          <input id="l-pin" class="input pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]*" placeholder="••••"></div>
+        ${reg ? `<div class="field"><label>パスワード（確認）</label>
+          <input id="l-pin2" class="input pin" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]*" placeholder="••••"></div>
+          ${hasLocal ? `<div class="note">この端末の記録（${local.history.length}回分）とメニューを新しいアカウントに引き継ぎます</div>` : ''}` : ''}
+        ${loginErr ? `<div class="err">${esc(loginErr)}</div>` : ''}
+        <button class="btn" type="submit" ${loginBusy ? 'disabled' : ''}>${loginBusy ? '通信中…' : reg ? '登録してはじめる' : 'ログイン'}</button>
+      </form>
+      <button class="local-link" data-act="use-local">ログインせずにこの端末だけで使う</button>
+    </div>`;
+  app.querySelector('#login-form').addEventListener('submit', e => { e.preventDefault(); doLogin(); });
+}
+async function doLogin() {
+  const reg = loginTab === 'register';
+  const q = s => app.querySelector(s);
+  const id = q('#l-id').value.trim().toLowerCase(), pin = q('#l-pin').value.trim();
+  const name = q('#l-name') ? q('#l-name').value.trim() : '';
+  loginId = id; loginName = name;
+  loginErr = '';
+  if (!/^[a-z0-9_-]{3,20}$/.test(id)) loginErr = 'IDは半角英数字・_・- の3〜20文字にしてください';
+  else if (!/^\d{4}$/.test(pin)) loginErr = 'パスワードは数字4桁です';
+  else if (reg && pin !== q('#l-pin2').value.trim()) loginErr = '確認用パスワードが一致しません';
+  if (loginErr) { renderLogin(); return; }
+  loginBusy = true; renderLogin();
+  try {
+    const body = reg
+      ? { id, pin, name, data: normalize(lsGet(KEY)) || seed() }
+      : { id, pin };
+    const r = await api(reg ? '/api/register' : '/api/login', { method: 'POST', body });
+    lsSet('badtore.lastId', id);
+    setSession({ token: r.token, id: r.user.id, name: r.user.name });
+    if (reg) { db = normalize(body.data); lsSet(cacheKey(), db); }
+    else { db = load(); lsSet(dirtyKey(), null); }
+    loginBusy = false; view = 'home'; render();
+    toast(reg ? `ようこそ、${r.user.name}さん！` : `おかえりなさい、${r.user.name}さん`);
+    if (!reg) pullFromServer();
+  } catch (e) {
+    loginBusy = false;
+    loginErr = e.message + (e.status >= 500 ? '\n（サーバーの準備ができていない可能性があります。下の「ログインせずに使う」なら端末だけで使えます）' : '');
+    renderLogin();
+  }
+}
+
+/* ---------------- account ---------------- */
+async function editName() {
+  const v = await formDialog('表示名を変更', [{ key: 'name', label: '表示名', value: session.name }]);
+  if (!v || !v.name) return;
+  try { const r = await api('/api/me/profile', { method: 'PUT', body: { name: v.name } }); session.name = r.user.name; setSession(session); render(); toast('変更しました'); }
+  catch (e) { toast(e.message); }
+}
+async function changePin() {
+  const v = await formDialog('パスワードを変更', [
+    { key: 'oldPin', label: '今のパスワード', pin: true },
+    { key: 'newPin', label: '新しいパスワード（数字4桁）', pin: true },
+    { key: 'newPin2', label: '新しいパスワード（確認）', pin: true },
+  ], '変更する');
+  if (!v) return;
+  if (!/^\d{4}$/.test(v.newPin)) { toast('新しいパスワードは数字4桁です'); return; }
+  if (v.newPin !== v.newPin2) { toast('確認用パスワードが一致しません'); return; }
+  try { await api('/api/me/profile', { method: 'PUT', body: { oldPin: v.oldPin, newPin: v.newPin }, noLogout: true }); toast('パスワードを変更しました'); }
+  catch (e) { toast(e.message); }
+}
+async function logout() {
+  if (!(await confirmDlg('ログアウト', `${session.name}（@${session.id}）からログアウトしますか？`, 'ログアウト'))) return;
+  if (lsGet(dirtyKey())) await syncNow();
+  try { await api('/api/logout', { method: 'POST', noLogout: true }); } catch (e) {}
+  lsSet(cacheKey(), null); lsSet(dirtyKey(), null);
+  setSession(null); view = 'login'; loginTab = 'login'; loginErr = ''; render();
+}
+function accountCard() {
+  if (online()) {
+    return `<div class="card acct">
+      <div class="avatar">${esc((session.name || session.id).slice(0, 1))}</div>
+      <div style="flex:1;min-width:0"><b>${esc(session.name)}</b><div class="muted">@${esc(session.id)}</div></div>
+    </div>
+    <div class="acct-btns">
+      <button class="btn white" data-act="acct-name">表示名を変更</button>
+      <button class="btn white" data-act="acct-pin">パスワード変更</button>
+      <button class="btn red" data-act="acct-logout">ログアウト</button>
+    </div>`;
+  }
+  return `<div class="card acct"><div style="flex:1"><b>この端末だけで使っています</b>
+      <div class="muted">ログインすると、みんなの記録を見たりメニューをもらえます。今の記録は新規登録で引き継げます。</div></div></div>
+    <div class="acct-btns"><button class="btn blue" data-act="to-login">ログイン / 新規登録</button></div>`;
+}
+
+/* ---------------- members ---------------- */
+let members = null, membersErr = '', memberQuery = '', member = null, memberOpen = {};
+const ago = t => {
+  if (!t) return 'まだ記録なし';
+  const d = Math.floor((Date.now() - t) / 86400000);
+  return d <= 0 ? '今日' : d === 1 ? '昨日' : `${d}日前`;
+};
+const avatar = (u, big) => `<div class="avatar ${big ? 'big' : ''}" style="background:hsl(${[...u.id].reduce((a, c) => a + c.charCodeAt(0), 0) * 37 % 360} 70% 55%)">${esc((u.name || u.id).slice(0, 1))}</div>`;
+
+async function loadMembers() {
+  membersErr = '';
+  try { members = (await api('/api/users')).users; }
+  catch (e) { membersErr = e.message; }
+  if (view === 'members') renderMemberList();
+}
+function renderMembers() {
+  if (!online()) {
+    app.innerHTML = `<div class="top"><h1>👥 みんな</h1></div>
+      <div class="wrap"><div class="card empty">ログインすると、ほかの人のメニューや記録を見られます。
+        <div style="margin-top:16px"><button class="btn blue" data-act="to-login">ログイン / 新規登録</button></div></div></div>${nav('members')}`;
+    return;
+  }
+  app.innerHTML = `
+    <div class="top"><h1>👥 みんな</h1><button class="tab" data-act="reload-members">更新</button></div>
+    <div class="wrap">
+      <input id="m-q" class="input" placeholder="IDか名前で探す" value="${esc(memberQuery)}" autocapitalize="off">
+      <div id="m-list"></div>
+    </div>${nav('members')}`;
+  const qi = app.querySelector('#m-q');
+  qi.addEventListener('input', () => { memberQuery = qi.value; renderMemberList(); });
+  renderMemberList();
+}
+function renderMemberList() {
+  const box = document.getElementById('m-list');
+  if (!box) return;
+  const qq = memberQuery.trim().toLowerCase();
+  const list = (members || []).filter(u => !qq || u.id.includes(qq) || (u.name || '').toLowerCase().includes(qq));
+  const rows = list.map(u => {
+    const st = streak(new Set(u.summary.days));
+    return `<div class="card member" data-act="open-member" data-id="${esc(u.id)}">
+      ${avatar(u)}
+      <div class="prog-body"><div class="prog-name">${esc(u.name)} ${u.id === session.id ? '<span class="badge mix">あなた</span>' : ''}</div>
+        <div class="prog-meta">@${esc(u.id)}・合計${u.summary.total}回・最終 ${ago(u.summary.lastAt)}</div></div>
+      <div class="m-streak ${st ? '' : 'off'}">🔥${st}</div>
+    </div>`;
+  }).join('');
+  box.innerHTML = `
+      <div class="sec-title">メンバー${members ? `（${list.length}人）` : ''}</div>
+      ${membersErr ? `<div class="err">${esc(membersErr)}</div>` : ''}
+      ${members ? (rows || '<div class="empty">見つかりませんでした</div>') : (membersErr ? '' : '<div class="empty">読み込み中…</div>')}`;
+}
+async function openMember(id) {
+  member = { id, loading: true }; memberOpen = {};
+  view = 'member'; render();
+  try { member = await api('/api/users/' + encodeURIComponent(id)); }
+  catch (e) { member = { id, error: e.message }; }
+  if (view === 'member') renderMember();
+}
+function renderMember() {
+  const back = `<div class="top"><button class="x" data-act="go-members" aria-label="戻る">‹</button><h1>メンバー</h1><div style="width:40px"></div></div>`;
+  if (!member || member.loading || member.error) {
+    app.innerHTML = back + `<div class="wrap"><div class="${member && member.error ? 'err' : 'empty'}">${esc(member && member.error ? member.error : '読み込み中…')}</div></div>${nav('members')}`;
+    return;
+  }
+  const u = member.user, days = new Set(u.summary.days), me = u.id === session.id;
+  const W = '日月火水木金土', today = new Date();
+  let week = '';
+  for (let i = 6; i >= 0; i--) {
+    const d = addDays(today, -i), on = days.has(dayKey(d));
+    week += `<div class="day">${W[d.getDay()]}<div class="dot ${on ? 'on' : ''} ${i === 0 ? 'today' : ''}">${on ? '✓' : ''}</div></div>`;
+  }
+  const progs = member.programs.map(p => {
+    const c = progCat(p), open = memberOpen[p.id];
+    return `<div class="card mprog">
+      <div class="mprog-head" data-act="toggle-mprog" data-id="${esc(p.id)}">
+        <div class="prog-ic ${c}">${CAT[c].emoji}</div>
+        <div class="prog-body"><div class="prog-name">${esc(p.name)}</div>
+          <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div></div>
+        <div class="chev">${open ? '▲' : '▼'}</div>
+      </div>
+      ${open ? `<ol class="mitems">${p.items.map(i => `<li><span class="badge ${i.category}">${CAT[i.category].label}</span> ${esc(i.name)} <b>${i.sec}秒</b>${i.interval ? `<span class="muted">（休${i.interval}秒）</span>` : ''}</li>`).join('')}</ol>` : ''}
+      ${me ? '' : `<button class="btn blue small" data-act="copy-prog" data-id="${esc(p.id)}">＋ 自分のメニューに追加</button>`}
+    </div>`;
+  }).join('') || '<div class="empty">メニューはありません</div>';
+  const logs = member.history.slice().reverse().slice(0, 30).map(h => {
+    const dt = new Date(h.at);
+    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目</div></div>
+      <div class="muted">${fmt(h.sec || 0)}</div></div>`;
+  }).join('') || '<div class="empty">まだ記録がありません</div>';
+  app.innerHTML = back + `
+    <div class="wrap">
+      <div class="card profile">${avatar(u, true)}<div><div class="p-name">${esc(u.name)} ${me ? '<span class="badge mix">あなた</span>' : ''}</div><div class="muted">@${esc(u.id)}</div></div></div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="card tile"><div class="v" style="color:var(--orange)">🔥 ${streak(days)}</div><div class="k">現在の連続日数</div></div>
+        <div class="card tile"><div class="v">🏆 ${bestStreak(days)}</div><div class="k">最高連続日数</div></div>
+        <div class="card tile"><div class="v">${u.summary.total}</div><div class="k">合計トレーニング回数</div></div>
+        <div class="card tile"><div class="v">${Math.round(u.summary.totalSec / 60)}<small style="font-size:14px">分</small></div><div class="k">合計時間</div></div>
+      </div>
+      <div class="card week" style="margin:12px 0 0">${week}</div>
+      <div class="sec-title">メニュー（${member.programs.length}）</div>
+      ${progs}
+      <div class="sec-title">最近の記録</div>
+      ${logs}
+    </div>${nav('members')}`;
+}
+async function copyProgram(pid) {
+  const p = member.programs.find(x => x.id === pid);
+  if (!p) return;
+  if (!(await confirmDlg('自分のメニューに追加', `${member.user.name}さんの「${p.name}」（${p.items.length}種目）を自分のメニューに追加しますか？`, '追加する'))) return;
+  db.programs.unshift({ id: uid(), name: p.name, items: p.items.map(i => ({ ...i, id: uid() })), from: { id: member.user.id, name: member.user.name } });
+  save(); toast(`「${p.name}」を追加しました`);
 }
 
 /* ---------------- events ---------------- */
@@ -594,6 +899,17 @@ app.addEventListener('click', e => {
   switch (act) {
     case 'go-home': view = 'home'; render(); break;
     case 'go-history': view = 'history'; render(); break;
+    case 'go-members': view = 'members'; render(); if (online()) loadMembers(); break;
+    case 'reload-members': members = null; renderMemberList(); loadMembers(); break;
+    case 'open-member': openMember(id); break;
+    case 'toggle-mprog': memberOpen[id] = !memberOpen[id]; { const y = window.scrollY; renderMember(); window.scrollTo(0, y); } break;
+    case 'copy-prog': copyProgram(id); break;
+    case 'login-tab': loginTab = id; loginErr = ''; renderLogin(); break;
+    case 'use-local': setSession({ local: true }); db = load(); view = 'home'; render(); break;
+    case 'to-login': setSession(null); view = 'login'; loginErr = ''; render(); break;
+    case 'acct-name': editName(); break;
+    case 'acct-pin': changePin(); break;
+    case 'acct-logout': logout(); break;
     case 'filter': homeFilter = id; render(); break;
     case 'start': startProgram(id); break;
     case 'edit': openEditor(id); break;
@@ -646,7 +962,9 @@ app.addEventListener('click', e => {
   }
 });
 
+if (!session) view = 'login';
 render();
+pullFromServer();
 
 /* ---------------- PWA ---------------- */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !window.__NO_SW__) {

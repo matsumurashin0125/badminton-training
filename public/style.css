@@ -167,3 +167,29 @@ input{font:inherit}
 @keyframes up{from{transform:translateY(40px);opacity:.5}}
 #toast{position:fixed;left:50%;bottom:calc(100px + var(--safe-b));transform:translate(-50%,20px);background:#3c3c3c;color:#fff;padding:12px 18px;border-radius:12px;font-weight:700;font-size:14px;z-index:200;opacity:0;pointer-events:none;transition:.2s;white-space:nowrap}
 #toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ---------- login / members ---------- */
+.login{padding:6vh 20px 30px;max-width:440px;margin:0 auto}
+.login-hero{text-align:center;margin-bottom:22px}
+.login-hero img{border-radius:22px;box-shadow:0 4px 0 var(--green-d)}
+.login-hero h1{font-size:26px;margin:14px 0 4px;font-weight:900}
+.input.pin{letter-spacing:.6em;text-align:center;font-size:24px;font-weight:900}
+.err{background:#ffe5e5;color:var(--red-d);border-radius:12px;padding:10px 12px;font-size:13px;font-weight:700;margin:0 0 14px;white-space:pre-line}
+.note{background:#ddf4ff;color:var(--blue-d);border-radius:12px;padding:10px 12px;font-size:13px;font-weight:700;margin:0 0 14px}
+.local-link{display:block;margin:22px auto 0;color:var(--sub);font-size:13px;font-weight:700;text-decoration:underline}
+.me-chip{display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:99px;border:2px solid var(--line);background:#fff;font-weight:800;font-size:13px;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sync{font-size:11px;color:var(--sub)}.sync.err{color:var(--red)}.sync.ok{color:var(--green-d)}
+.avatar{width:46px;height:46px;border-radius:50%;background:var(--blue);color:#fff;display:grid;place-items:center;font-weight:900;font-size:20px;flex:none}
+.avatar.big{width:64px;height:64px;font-size:28px}
+.acct{display:flex;align-items:center;gap:12px;padding:14px}
+.acct-btns{display:grid;gap:10px;margin-top:12px}
+.member{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:10px;border-bottom-width:4px;cursor:pointer}
+.m-streak{font-weight:900;color:var(--orange);font-size:18px;flex:none}
+.m-streak.off{filter:grayscale(1);opacity:.5}
+.profile{display:flex;align-items:center;gap:14px;padding:16px}
+.p-name{font-size:20px;font-weight:900}
+.mprog{padding:12px 14px;margin-bottom:12px}
+.mprog-head{display:flex;align-items:center;gap:12px;cursor:pointer}
+.chev{color:#aaa;font-size:12px}
+.mitems{margin:12px 0 4px;padding-left:22px;font-size:14px;line-height:1.9}
+.btn.small{padding:11px;font-size:14px;margin-top:12px}
