@@ -4,7 +4,7 @@
    - public/ の静的ファイル配信
    - /api/* : アカウント（追加・名前変更・削除）、データ同期、メンバー閲覧
      ※ パスワードなし。最初にアカウントを選ぶだけの簡易方式
-   保存先: Cloud Run 上では Firestore、ローカルでは data/db.json
+   保存先: Cloud Run 上では Cloud Storage（環境変数 BUCKET）、ローカルでは data/db.json
    ========================================================= */
 const http = require('http');
 const fs = require('fs');
@@ -13,7 +13,6 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8080;
 const PUBLIC = path.join(__dirname, 'public');
-const STORE = process.env.STORE || (process.env.K_SERVICE ? 'firestore' : 'file');
 const MAX_BODY = 900 * 1024;
 
 /* ---------------- storage ---------------- */
@@ -41,28 +40,49 @@ function fileStore() {
   };
 }
 
-function firestoreStore() {
-  const { Firestore } = require('@google-cloud/firestore');
-  const fsdb = new Firestore(process.env.FIRESTORE_DATABASE ? { databaseId: process.env.FIRESTORE_DATABASE } : {});
-  const users = fsdb.collection('users');
-  const userdata = fsdb.collection('userdata');
-  const get = async ref => { const s = await ref.get(); return s.exists ? s.data() : null; };
+// Cloud Storage: バケットに users/<id>.json と userdata/<id>.json を置く
+function gcsStore(bucketName) {
+  const { Storage } = require('@google-cloud/storage');
+  const bucket = new Storage().bucket(bucketName);
+  const uFile = id => bucket.file(`users/${id}.json`);
+  const dFile = id => bucket.file(`userdata/${id}.json`);
+  const opts = { contentType: 'application/json; charset=utf-8', resumable: false, metadata: { cacheControl: 'no-store' } };
+  async function read(file) {
+    try { const [buf] = await file.download(); return JSON.parse(buf.toString('utf8')); }
+    catch (e) { if (e.code === 404) return null; throw e; }
+  }
+  const write = (file, obj) => file.save(JSON.stringify(obj), opts);
   return {
-    getUser: id => get(users.doc(id)),
+    getUser: id => read(uFile(id)),
     async createUser(u) {
-      try { await users.doc(u.id).create(u); return true; }
-      catch (e) { if (e.code === 6) return false; throw e; }   // 6 = ALREADY_EXISTS
+      // ifGenerationMatch: 0 = まだ存在しないときだけ作成（同じIDの上書き防止）
+      try { await uFile(u.id).save(JSON.stringify(u), { ...opts, preconditionOpts: { ifGenerationMatch: 0 } }); return true; }
+      catch (e) { if (e.code === 412) return false; throw e; }
     },
-    updateUser: (id, patch) => users.doc(id).set(patch, { merge: true }),
-    async listUsers() { const q = await users.get(); return q.docs.map(d => d.data()); },
-    getData: id => get(userdata.doc(id)),
-    setData: (id, data) => userdata.doc(id).set(data),
-    async deleteUser(id) { await userdata.doc(id).delete(); await users.doc(id).delete(); },
+    async updateUser(id, patch) {
+      const u = await read(uFile(id));
+      if (u) await write(uFile(id), { ...u, ...patch });
+    },
+    async listUsers() {
+      const [files] = await bucket.getFiles({ prefix: 'users/' });
+      const list = await Promise.all(files.filter(f => f.name.endsWith('.json')).map(f => read(f).catch(() => null)));
+      return list.filter(Boolean);
+    },
+    getData: id => read(dFile(id)),
+    setData: (id, data) => write(dFile(id), data),
+    async deleteUser(id) {
+      await dFile(id).delete({ ignoreNotFound: true });
+      await uFile(id).delete({ ignoreNotFound: true });
+    },
   };
 }
 
-const store = STORE === 'firestore' ? firestoreStore() : fileStore();
-console.log(`storage: ${STORE}`);
+// 保存先の決定: BUCKET があれば Cloud Storage、ローカルではファイル。
+// Cloud Run で BUCKET 未設定だとデータが消えるので、API を止めて知らせる
+const BUCKET = process.env.BUCKET;
+const STORE = process.env.STORE || (BUCKET ? 'gcs' : process.env.K_SERVICE ? 'none' : 'file');
+const store = STORE === 'gcs' ? gcsStore(BUCKET) : STORE === 'file' ? fileStore() : null;
+console.log(`storage: ${STORE}${BUCKET ? ' (' + BUCKET + ')' : ''}`);
 
 /* ---------------- helpers ---------------- */
 const ID_RE = /^[a-z0-9_-]{3,20}$/;
@@ -132,6 +152,7 @@ const newId = () => 'u' + crypto.randomBytes(4).toString('hex');
 
 async function api(req, res, url) {
   const p = url.pathname, M = req.method;
+  if (!store) throw new HttpError(503, '保存先が設定されていません。Cloud Run の環境変数 BUCKET に Cloud Storage のバケット名を設定してください');
 
   // アカウント一覧
   if (p === '/api/users' && M === 'GET') {
