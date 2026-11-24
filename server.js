@@ -237,6 +237,16 @@ function serveStatic(req, res, url) {
   fs.createReadStream(file).pipe(res);
 }
 
+// Cloud Storage のエラーを、画面で原因がわかる日本語に変換
+function storageError(e) {
+  const code = Number(e.code) || 0, msg = String(e.message || '');
+  const who = (/^([\w.-]+@[\w.-]+)/.exec(msg.replace(/^.*?([\w.-]+@[\w.-]+\.gserviceaccount\.com).*$/s, '$1')) || [])[1];
+  if (code === 403) return new HttpError(500, `Cloud Storage へのアクセス権がありません（バケット: ${BUCKET}${who ? '、実行アカウント: ' + who : ''}）。バケットの「権限」でこのアカウントに「Storage オブジェクト管理者」を付けてください`);
+  if (code === 404) return new HttpError(500, `バケット「${BUCKET}」が見つかりません。環境変数 BUCKET のつづりと、バケットが同じプロジェクトにあるか確認してください`);
+  if (code === 401) return new HttpError(500, 'Cloud Storage の認証に失敗しました');
+  return new HttpError(500, `保存先でエラーが発生しました（${code || 'unknown'}: ${msg.slice(0, 160)}）`);
+}
+
 /* ---------------- server ---------------- */
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -244,6 +254,7 @@ http.createServer(async (req, res) => {
     try { await api(req, res, url); }
     catch (e) {
       if (!(e instanceof HttpError)) console.error(e);
+      if (!(e instanceof HttpError) && STORE === 'gcs') e = storageError(e);
       send(res, e.status || 500, { error: e.status ? e.message : 'サーバーエラーが発生しました' });
     }
     return;
