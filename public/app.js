@@ -298,6 +298,42 @@ function nav(active) {
   </div></nav>`;
 }
 
+/* ---------------- 以前のデータ（アカウント機能より前の保存分）の取り込み ---------------- */
+const SEED_NAMES = ['体幹ベーシック', 'フットワーク基礎'];
+const progSig = p => JSON.stringify([p.name, (p.items || []).map(i => [i.category, i.name, i.sec, i.interval || 0])]);
+function legacyImportable() {
+  if (!online()) return null;
+  const legacy = normalize(lsGet(KEY));
+  if (!legacy) return null;
+  const have = new Set(db.programs.map(progSig));
+  const haveIds = new Set(db.history.map(h => h.id));
+  const programs = legacy.programs.filter(p => !have.has(progSig(p)) && (p.items || []).length);
+  const history = legacy.history.filter(h => !haveIds.has(h.id));
+  return programs.length || history.length ? { programs, history } : null;
+}
+const legacyDismissKey = () => `badtore.legacyDismissed.${session.id}`;
+function legacyBanner() {
+  const L = legacyImportable();
+  if (!L || lsGet(legacyDismissKey())) return '';
+  const names = L.programs.slice(0, 4).map(p => `「${esc(p.name)}」`).join('') + (L.programs.length > 4 ? ` ほか${L.programs.length - 4}件` : '');
+  return `<div class="card legacy">
+    <b>この端末に以前のデータが残っています</b>
+    <div class="muted">${L.programs.length ? `メニュー${L.programs.length}件 ${names}` : ''}${L.history.length ? `${L.programs.length ? '・' : ''}記録${L.history.length}回分` : ''}</div>
+    <div class="legacy-btns"><button class="btn small" data-act="legacy-import">取り込む</button>
+    <button class="btn white small" data-act="legacy-dismiss">今はしない</button></div>
+  </div>`;
+}
+async function importLegacy() {
+  const L = legacyImportable();
+  if (!L) { toast('取り込めるデータはありません'); return; }
+  const what = [L.programs.length ? `メニュー${L.programs.length}件` : '', L.history.length ? `記録${L.history.length}回分` : ''].filter(Boolean).join('と');
+  if (!(await confirmDlg('以前のデータを取り込む', `この端末に残っている${what}を「${session.name}」に追加しますか？\n今あるメニューと記録はそのまま残ります。`, '取り込む'))) return;
+  const ids = new Set(db.programs.map(p => p.id));
+  db.programs = db.programs.concat(L.programs.map(p => ({ ...p, id: ids.has(p.id) ? uid() : p.id })));
+  db.history = db.history.concat(L.history).sort((a, b) => (a.at || 0) - (b.at || 0));
+  save(); render(); toast(`${what}を取り込みました`);
+}
+
 /* ---------------- home ---------------- */
 function renderHome() {
   const st = streak(), days = doneDays(), today = new Date(), doneToday = days.has(dayKey());
@@ -326,6 +362,7 @@ function renderHome() {
   app.innerHTML = `
     <div class="top"><h1 class="brand"><img src="icon-192.png" alt="" width="34" height="34">KOSO REN <span>TRAINING</span></h1>
       ${online() ? `<button class="me-chip" data-act="switch-acct" aria-label="${esc(session.name)}（アカウント切り替え）">${avatar(session, false, true)}<span class="chip-name">${esc(session.name)}</span><span id="sync" class="sync">☁</span></button>` : `<button class="me-chip" data-act="switch-acct">アカウント</button>`}</div>
+    ${online() ? legacyBanner() : ''}
     <div class="card streak">
       <div class="flame ${doneToday ? 'on' : ''}">🔥</div>
       <div><div class="streak-num">${st}<small>日連続</small></div><div class="streak-msg">${msg}</div></div>
@@ -670,6 +707,7 @@ function renderHistory() {
       </div>
       <div class="sec-title">アカウント</div>
       ${accountCard()}
+      ${online() && legacyImportable() ? `<div class="acct-btns"><button class="btn white" data-act="legacy-import">この端末の以前のデータを取り込む</button></div>` : ''}
       <div class="sec-title">設定</div>
       <div class="card switch"><b>音声ガイド</b>
         <button class="tab ${db.settings.voice ? 'on' : ''}" data-act="voice-set">${db.settings.voice ? 'ON' : 'OFF'}</button></div>
@@ -730,8 +768,10 @@ async function addAccount() {
   if (!v.name) { toast('名前を入力してください'); return; }
   let data = seed();
   const legacy = normalize(lsGet(KEY));
-  if (legacy && legacy.history.length && !lsGet('badtore.imported')) {
-    if (await confirmDlg('記録の引き継ぎ', `この端末にある記録（${legacy.history.length}回分）とメニューを「${v.name}」に引き継ぎますか？`, '引き継ぐ')) {
+  const ownProgs = legacy ? legacy.programs.filter(p => !SEED_NAMES.includes(p.name)) : [];
+  if (legacy && (legacy.history.length || ownProgs.length) && !lsGet('badtore.imported')) {
+    const what = [ownProgs.length ? `メニュー${ownProgs.length}件` : '', legacy.history.length ? `記録${legacy.history.length}回分` : ''].filter(Boolean).join('と');
+    if (await confirmDlg('データの引き継ぎ', `この端末にある${what}を「${v.name}」に引き継ぎますか？`, '引き継ぐ')) {
       data = legacy; lsSet('badtore.imported', 1);
     }
   }
@@ -916,6 +956,8 @@ app.addEventListener('click', e => {
     case 'rename-acct': renameAccount(id); break;
     case 'del-acct': deleteAccount(id); break;
     case 'manage-acct': acctManage = !acctManage; renderAccounts(); break;
+    case 'legacy-import': importLegacy(); break;
+    case 'legacy-dismiss': lsSet(legacyDismissKey(), 1); render(); toast('記録画面の「アカウント」からいつでも取り込めます'); break;
     case 'use-local':
       (online() ? syncNow() : Promise.resolve()).then(() => { setSession({ local: true }); db = load(); view = 'home'; render(); });
       break;
