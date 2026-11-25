@@ -152,7 +152,7 @@ function bestStreak(set = doneDays()) {
   return best;
 }
 const fmt = sec => { const m = Math.floor(sec / 60), s = sec % 60; return m ? `${m}分${s ? s + '秒' : ''}` : `${s}秒`; };
-const totalSec = p => p.items.reduce((a, it, i) => a + it.sec + (i < p.items.length - 1 ? (it.interval || PREP_SEC) : 0), PREP_SEC);
+const totalSec = p => p.items.reduce((a, it, i) => a + it.sec + (i < p.items.length - 1 ? (it.interval || 0) : 0), PREP_SEC);
 const progCat = p => { const c = new Set(p.items.map(i => i.category)); return c.size === 1 ? [...c][0] : 'mix'; };
 
 /* ---------------- audio / voice ---------------- */
@@ -375,7 +375,7 @@ function renderEditor() {
       <button data-act="down" data-id="${i}" aria-label="下へ" ${i === E.items.length - 1 ? 'disabled' : ''}>▼</button>
       <button data-act="del-item" data-id="${i}" aria-label="削除">🗑</button>
     </div>
-    ${i < E.items.length - 1 ? `<div class="int-line">${it.interval ? `⏸ インターバル ${it.interval}秒` : `⏱ 準備 ${PREP_SEC}秒`}</div>` : ''}`).join('');
+    ${i < E.items.length - 1 ? `<div class="int-line">${it.interval ? `⏸ インターバル ${it.interval}秒` : `⏩ すぐ次へ`}</div>` : ''}`).join('');
 
   app.innerHTML = `
     <div class="top"><button class="x" data-act="cancel-edit" aria-label="閉じる">✕</button>
@@ -496,8 +496,10 @@ function buildPhases(p) {
     const nx = p.items[i + 1];
     if (!nx) return;
     if (item.interval > 0) ph.push({ type: 'rest', sec: item.interval, item: nx, idx: i + 1 });
-    else ph.push({ type: 'prep', sec: PREP_SEC, item: nx, idx: i + 1 });
   });
+  // インターバルなしの種目は、準備時間を入れずにそのまま次の種目へ
+  ph.forEach((x, k) => { if (x.type === 'work' && k > 0 && ph[k - 1].type === 'work') x.chain = true; });
+  ph.forEach((x, k) => { if (x.type === 'work' && ph[k + 1] && ph[k + 1].chain) x.nextChain = ph[k + 1].item; });
   return ph;
 }
 const C = 2 * Math.PI * 140;
@@ -558,7 +560,7 @@ function onPhaseStart(ph) {
     speak(ph.first ? `${ph.item.name}、${ph.item.sec}秒。準備してください` : `終了。次は、${ph.item.name}、${ph.item.sec}秒`, true);
   } else if (ph.type === 'work') {
     beep(1200, 0.35, 0.35);
-    speak('スタート', true);
+    speak(ph.chain ? ph.item.name : 'スタート', true);   // 続けて始まる種目は名前で知らせる
   } else {
     beep(520, 0.3);
     speak(ph.sec > REST_COUNT_FROM + 2 ? `終了。インターバル、${ph.sec}秒。次は、${ph.item.name}` : 'インターバル', true);
@@ -569,7 +571,7 @@ function onSecond(ph, s) {
     if (s <= 3) countVoice(s); else beep(440, 0.06, 0.15);
   } else if (ph.type === 'work') {
     if (s <= WORK_COUNT_FROM) countVoice(s);
-    else if (s === 10 && ph.sec >= 20) speak('ラスト10秒', true);
+    else if (s === 10 && ph.sec >= 20) speak(ph.nextChain ? `ラスト10秒。次は、${ph.nextChain.name}` : 'ラスト10秒', true);
   } else {
     if (s <= REST_COUNT_FROM) countVoice(s);
   }
