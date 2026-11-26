@@ -202,6 +202,7 @@ function streakOf(days, today) {
   return n;
 }
 const pushDocName = id => `push/${id}`;
+const NUDGE_GAP_MS = 30 * 1000;
 const emptyPush = () => ({ subs: [], reminder: { enabled: true, hour: 22 }, nudges: {}, lastAutoDay: null });
 async function getPush(id) { return Object.assign(emptyPush(), await store.getDoc(pushDocName(id))); }
 // 登録された全端末へ送る。無効になった端末(404/410)は登録から外す
@@ -225,7 +226,8 @@ async function sendPush(id, payload) {
 function reminderPayload(days, today) {
   const st = streakOf(days, today);
   return {
-    title: st > 0 ? `🔥 ${st}日連続がピンチ！` : 'KOSO REN TRAINING',
+    // st = 昨日までの連続日数。今日やれば st + 1 日連続になる
+    title: st > 0 ? `🔥 ${st + 1}日連続がかかってるよ！` : 'KOSO REN TRAINING',
     body: st > 0 ? '今日のトレーニングがまだです。1メニューだけでも続けよう！' : '今日のコソ練、まだだよ！1メニューから始めよう',
     tag: 'daily-reminder', url: '/',
   };
@@ -366,16 +368,18 @@ async function api(req, res, url) {
       if (days.includes(day)) throw new HttpError(409, `${u.name}さんは今日もう練習済みです 👏`);
       const d = await getPush(id);
       if (!d.subs.length) throw new HttpError(409, `${u.name}さんは通知をオンにしていません`);
-      if (d.nudges[fromId] === day) throw new HttpError(429, `${u.name}さんは今日もうつつきました。また明日！`);
+      // 何回でもつつける。連打で通知が重ならないよう、同じ相手へは30秒あける
+      const last = typeof d.nudges[fromId] === 'number' ? d.nudges[fromId] : 0;
+      if (Date.now() - last < NUDGE_GAP_MS) throw new HttpError(429, `${u.name}さんをつついたばかりです。少し待ってからもう一度どうぞ`);
       const st = streakOf(days, day);
       const sent = await sendPush(id, {
         title: `👉 ${from.name}さんがつついています`,
-        body: st > 0 ? `🔥${st}日連続がかかってるよ！今日のコソ練をしよう` : '一緒にコソ練しよう！今日の1メニューから',
+        body: st > 0 ? `🔥${st + 1}日連続がかかってるよ！今日のコソ練をしよう` : '一緒にコソ練しよう！今日の1メニューから',
         tag: `nudge-${fromId}`, url: '/',
       });
       if (!sent) throw new HttpError(409, `${u.name}さんに通知を届けられませんでした`);
       const d2 = await getPush(id);           // 届いたときだけ「今日つついた」を記録
-      d2.nudges[fromId] = day;
+      d2.nudges[fromId] = Date.now();
       await store.putDoc(pushDocName(id), d2);
       return send(res, 200, { ok: true });
     }
