@@ -220,3 +220,12 @@ input{font:inherit}
 .brand img{border-radius:9px}
 .brand span{color:var(--green-d)}
 .login-hero img{border-radius:22px;box-shadow:none}
+
+/* ---------- notifications / nudge ---------- */
+.nudge{flex:none;padding:8px 10px;border-radius:12px;background:var(--orange);color:#fff;font-weight:900;font-size:13px;box-shadow:0 3px 0 var(--orange-d);white-space:nowrap}
+.nudge:active{transform:translateY(2px);box-shadow:0 1px 0 var(--orange-d)}
+.nudge.off{background:#e5e5e5;color:#999;box-shadow:0 3px 0 #ccc}
+.nudge.done{background:none;box-shadow:none;color:var(--green-d);font-size:12px;padding:8px 4px}
+.input.sel{width:auto;flex:none;padding:10px 12px;font-weight:800}
+.legacy-btns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.legacy-btns .btn{margin-top:0}

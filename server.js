@@ -2,7 +2,8 @@
 /* =========================================================
    KOSO REN TRAINING サーバー
    - public/ の静的ファイル配信
-   - /api/* : アカウント（追加・名前変更・削除）、データ同期、メンバー閲覧
+   - /api/* : アカウント（追加・名前変更・削除）、データ同期、メンバー閲覧、
+              プッシュ通知（つつく・毎日の自動リマインド）
      ※ パスワードなし。最初にアカウントを選ぶだけの簡易方式
    保存先: Cloud Run 上では Cloud Storage（環境変数 BUCKET）、ローカルでは data/db.json
    ========================================================= */
@@ -18,7 +19,7 @@ const MAX_BODY = 900 * 1024;
 /* ---------------- storage ---------------- */
 function fileStore() {
   const file = process.env.DATA_FILE || path.join(__dirname, 'data', 'db.json');
-  let db = { users: {}, userdata: {} };
+  let db = { users: {}, userdata: {}, docs: {} };
   try { db = Object.assign(db, JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) {}
   let timer = null;
   const persist = () => {
@@ -37,6 +38,12 @@ function fileStore() {
     async getData(id) { return clone(db.userdata[id]); },
     async setData(id, data) { db.userdata[id] = data; persist(); },
     async deleteUser(id) { delete db.users[id]; delete db.userdata[id]; persist(); },
+    // 汎用ドキュメント（通知の登録など）
+    async getDoc(name) { return clone(db.docs[name]); },
+    async putDoc(name, obj) { db.docs[name] = clone(obj); persist(); },
+    async createDoc(name, obj) { if (db.docs[name]) return false; db.docs[name] = clone(obj); persist(); return true; },
+    async listDocs(prefix) { return Object.keys(db.docs).filter(k => k.startsWith(prefix)).map(k => ({ name: k, doc: clone(db.docs[k]) })); },
+    async deleteDoc(name) { delete db.docs[name]; persist(); },
   };
 }
 
@@ -74,6 +81,20 @@ function gcsStore(bucketName) {
       await dFile(id).delete({ ignoreNotFound: true });
       await uFile(id).delete({ ignoreNotFound: true });
     },
+    // 汎用ドキュメント: <name>.json（通知の登録など）
+    getDoc: name => read(bucket.file(`${name}.json`)),
+    putDoc: (name, obj) => write(bucket.file(`${name}.json`), obj),
+    async createDoc(name, obj) {
+      try { await bucket.file(`${name}.json`).save(JSON.stringify(obj), { ...opts, preconditionOpts: { ifGenerationMatch: 0 } }); return true; }
+      catch (e) { if (e.code === 412) return false; throw e; }
+    },
+    async listDocs(prefix) {
+      const [files] = await bucket.getFiles({ prefix });
+      const list = await Promise.all(files.filter(f => f.name.endsWith('.json'))
+        .map(async f => ({ name: f.name.slice(0, -5), doc: await read(f).catch(() => null) })));
+      return list.filter(x => x.doc);
+    },
+    deleteDoc: name => bucket.file(`${name}.json`).delete({ ignoreNotFound: true }),
   };
 }
 
@@ -146,9 +167,74 @@ const publicUser = u => ({
   summary: u.summary || { days: [], total: 0, totalSec: 0, lastAt: null, programCount: 0 },
 });
 
+/* ---------------- プッシュ通知 ---------------- */
+// 鍵(VAPID)は環境変数があればそれを、なければ初回に作って保存先(config/vapid)に保管する
+const APP_TZ = process.env.APP_TZ || 'Asia/Tokyo';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'https://github.com/matsumurashin0125/badminton-training';
+const PUSH_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*(fcm\.googleapis\.com|push\.apple\.com|push\.services\.mozilla\.com|notify\.windows\.com)(:\d+)?\//i;
+let webpush = null, vapidPublic = null;
+async function initPush() {
+  if (vapidPublic) return vapidPublic;
+  let keys = process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY
+    ? { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY } : null;
+  webpush = webpush || require('web-push');
+  if (!keys) {
+    keys = await store.getDoc('config/vapid');
+    if (!keys) {
+      const k = webpush.generateVAPIDKeys();
+      keys = (await store.createDoc('config/vapid', k)) ? k : await store.getDoc('config/vapid');
+    }
+  }
+  webpush.setVapidDetails(VAPID_SUBJECT, keys.publicKey, keys.privateKey);
+  return (vapidPublic = keys.publicKey);
+}
+// 日本時間の「今日」と「今の時」
+function tzNow(d = new Date()) {
+  const f = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+    .formatToParts(d).map(x => [x.type, x.value]));
+  return { day: `${f.year}-${f.month}-${f.day}`, hour: Number(f.hour) };
+}
+function prevDay(key) { const d = new Date(key + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+function streakOf(days, today) {
+  const set = new Set(days || []);
+  let k = set.has(today) ? today : prevDay(today), n = 0;
+  while (set.has(k)) { n++; k = prevDay(k); }
+  return n;
+}
+const pushDocName = id => `push/${id}`;
+const emptyPush = () => ({ subs: [], reminder: { enabled: true, hour: 20 }, nudges: {}, lastAutoDay: null });
+async function getPush(id) { return Object.assign(emptyPush(), await store.getDoc(pushDocName(id))); }
+// 登録された全端末へ送る。無効になった端末(404/410)は登録から外す
+async function sendPush(id, payload) {
+  await initPush();
+  const doc = await getPush(id);
+  let sent = 0; const alive = [];
+  for (const sub of doc.subs) {
+    try {
+      await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify(payload), { TTL: 6 * 3600, urgency: 'normal' });
+      sent++; alive.push(sub);
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) continue;
+      console.error('push error', e.statusCode, e.body || e.message);
+      alive.push(sub);
+    }
+  }
+  if (alive.length !== doc.subs.length) await store.putDoc(pushDocName(id), { ...doc, subs: alive });
+  return sent;
+}
+function reminderPayload(days, today) {
+  const st = streakOf(days, today);
+  return {
+    title: st > 0 ? `🔥 ${st}日連続がピンチ！` : 'KOSO REN TRAINING',
+    body: st > 0 ? '今日のトレーニングがまだです。1メニューだけでも続けよう！' : '今日のコソ練、まだだよ！1メニューから始めよう',
+    tag: 'daily-reminder', url: '/',
+  };
+}
+
 /* ---------------- API ---------------- */
-const userPath = /^\/api\/users\/([a-z0-9_-]{3,20})(\/data)?$/;
+const userPath = /^\/api\/users\/([a-z0-9_-]{3,20})(\/[a-z]+(?:\/[a-z]+)?)?$/;
 const newId = () => 'u' + crypto.randomBytes(4).toString('hex');
+const sha = v => crypto.createHash('sha256').update(String(v)).digest('hex');
 
 async function api(req, res, url) {
   const p = url.pathname, M = req.method;
@@ -156,9 +242,11 @@ async function api(req, res, url) {
 
   // アカウント一覧
   if (p === '/api/users' && M === 'GET') {
-    const list = (await store.listUsers()).map(publicUser)
+    const [users, pushes] = await Promise.all([store.listUsers(), store.listDocs('push/').catch(() => [])]);
+    const pushOn = new Set(pushes.filter(x => x.doc.subs && x.doc.subs.length).map(x => x.name.slice(5)));
+    const list = users.map(u => ({ ...publicUser(u), pushOn: pushOn.has(u.id) }))
       .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-    return send(res, 200, { users: list });
+    return send(res, 200, { users: list, today: tzNow().day });
   }
 
   // アカウント追加 { name, id?, data? }
@@ -181,25 +269,53 @@ async function api(req, res, url) {
     throw new HttpError(500, 'IDを作れませんでした。もう一度試してください');
   }
 
+  // 通知の公開鍵
+  if (p === '/api/push/key' && M === 'GET') return send(res, 200, { publicKey: await initPush() });
+
+  // 毎時、Cloud Scheduler から呼ぶ：設定した時刻に、今日まだの人へ自動リマインド（1日1回まで）
+  if (p === '/api/cron/reminders' && (M === 'POST' || M === 'GET')) {
+    if (process.env.CRON_SECRET && req.headers['x-cron-secret'] !== process.env.CRON_SECRET && url.searchParams.get('key') !== process.env.CRON_SECRET) {
+      throw new HttpError(403, 'forbidden');
+    }
+    const { day, hour } = tzNow();
+    const force = url.searchParams.get('hour');
+    const atHour = force != null && force !== '' ? Number(force) : hour;
+    let checked = 0, sent = 0;
+    for (const { name, doc } of await store.listDocs('push/')) {
+      const id = name.slice(5), d = Object.assign(emptyPush(), doc);
+      if (!d.reminder.enabled || d.reminder.hour !== atHour || d.lastAutoDay === day || !d.subs.length) continue;
+      checked++;
+      await store.putDoc(name, { ...d, lastAutoDay: day });
+      const u = await store.getUser(id);
+      if (!u) continue;
+      const days = (u.summary && u.summary.days) || [];
+      if (days.includes(day)) continue;               // 今日もう練習した人には送らない
+      sent += await sendPush(id, reminderPayload(days, day));
+    }
+    return send(res, 200, { ok: true, day, hour: atHour, checked, sent });
+  }
+
   const m = userPath.exec(p);
   if (m) {
-    const id = m[1], isData = !!m[2];
+    const id = m[1], sub = m[2] || '', isData = sub === '/data';
+    if (sub && !['/data', '/push', '/push/test', '/reminder', '/nudge'].includes(sub)) throw new HttpError(404, 'Not found');
     const u = await store.getUser(id);
     if (!u) throw new HttpError(404, 'そのアカウントは見つかりません（削除された可能性があります）');
 
-    if (!isData && M === 'GET') {          // その人のメニューと記録
+    if (sub === '' && M === 'GET') {        // その人のメニューと記録
       const data = (await store.getData(id)) || cleanData({});
       return send(res, 200, { user: publicUser(u), programs: data.programs, history: data.history, settings: data.settings });
     }
-    if (!isData && M === 'PUT') {          // 名前変更
+    if (sub === '' && M === 'PUT') {        // 名前変更
       const b = await readBody(req);
       const name = str(b.name, 30).trim();
       if (!name) throw new HttpError(400, '名前を入力してください');
       await store.updateUser(id, { name });
       return send(res, 200, { user: publicUser({ ...u, name }) });
     }
-    if (!isData && M === 'DELETE') {       // アカウント削除（記録も消える）
+    if (sub === '' && M === 'DELETE') {     // アカウント削除（記録・通知登録も消える）
       await store.deleteUser(id);
+      await store.deleteDoc(pushDocName(id));
       return send(res, 200, { ok: true });
     }
     if (isData && M === 'PUT') {           // データ保存
@@ -208,6 +324,60 @@ async function api(req, res, url) {
       await store.setData(id, { ...data, updatedAt });
       await store.updateUser(id, { summary: summarize(data) });
       return send(res, 200, { ok: true, updatedAt });
+    }
+
+    // ---- 通知 ----
+    if (sub === '/push' && M === 'GET') {     // 通知の設定状況（ep = この端末の登録のハッシュ）
+      const d = await getPush(id), ep = url.searchParams.get('ep');
+      return send(res, 200, { devices: d.subs.length, reminder: d.reminder, thisDevice: !!ep && d.subs.some(x => sha(x.endpoint) === ep) });
+    }
+    if (sub === '/push' && M === 'PUT') {     // この端末を通知先に登録
+      const b = await readBody(req), s = b.subscription || {};
+      if (!PUSH_HOST_RE.test(str(s.endpoint, 1000)) || !s.keys || !s.keys.p256dh || !s.keys.auth) throw new HttpError(400, '通知の登録情報が正しくありません');
+      const entry = { endpoint: str(s.endpoint, 1000), keys: { p256dh: str(s.keys.p256dh, 200), auth: str(s.keys.auth, 100) }, addedAt: Date.now() };
+      const d = await getPush(id);
+      d.subs = d.subs.filter(x => x.endpoint !== entry.endpoint).concat(entry).slice(-10);
+      await store.putDoc(pushDocName(id), d);
+      return send(res, 200, { ok: true, devices: d.subs.length, reminder: d.reminder });
+    }
+    if (sub === '/push' && M === 'DELETE') {  // この端末の登録を外す
+      const b = await readBody(req), d = await getPush(id);
+      d.subs = d.subs.filter(x => x.endpoint !== str(b.endpoint, 1000));
+      await store.putDoc(pushDocName(id), d);
+      return send(res, 200, { ok: true, devices: d.subs.length });
+    }
+    if (sub === '/push/test' && M === 'POST') {
+      const sent = await sendPush(id, { title: 'KOSO REN TRAINING', body: '通知のテストです。これが届けば設定完了！', tag: 'test', url: '/' });
+      if (!sent) throw new HttpError(409, '通知を送れる端末がありません。もう一度「通知をオンにする」を押してください');
+      return send(res, 200, { ok: true, sent });
+    }
+    if (sub === '/reminder' && M === 'PUT') { // 毎日の自動リマインド設定
+      const b = await readBody(req), d = await getPush(id);
+      d.reminder = { enabled: !!b.enabled, hour: num(b.hour, 5, 23) };
+      await store.putDoc(pushDocName(id), d);
+      return send(res, 200, { ok: true, reminder: d.reminder });
+    }
+    if (sub === '/nudge' && M === 'POST') {   // つつく { from }
+      const b = await readBody(req), fromId = str(b.from, 20);
+      const from = ID_RE.test(fromId) ? await store.getUser(fromId) : null;
+      if (!from) throw new HttpError(400, 'つつく人のアカウントが見つかりません');
+      if (fromId === id) throw new HttpError(400, '自分はつつけません');
+      const { day } = tzNow(), days = (u.summary && u.summary.days) || [];
+      if (days.includes(day)) throw new HttpError(409, `${u.name}さんは今日もう練習済みです 👏`);
+      const d = await getPush(id);
+      if (!d.subs.length) throw new HttpError(409, `${u.name}さんは通知をオンにしていません`);
+      if (d.nudges[fromId] === day) throw new HttpError(429, `${u.name}さんは今日もうつつきました。また明日！`);
+      const st = streakOf(days, day);
+      const sent = await sendPush(id, {
+        title: `👉 ${from.name}さんがつついています`,
+        body: st > 0 ? `🔥${st}日連続がかかってるよ！今日のコソ練をしよう` : '一緒にコソ練しよう！今日の1メニューから',
+        tag: `nudge-${fromId}`, url: '/',
+      });
+      if (!sent) throw new HttpError(409, `${u.name}さんに通知を届けられませんでした`);
+      const d2 = await getPush(id);           // 届いたときだけ「今日つついた」を記録
+      d2.nudges[fromId] = day;
+      await store.putDoc(pushDocName(id), d2);
+      return send(res, 200, { ok: true });
     }
   }
 

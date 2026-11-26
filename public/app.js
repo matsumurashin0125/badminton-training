@@ -672,6 +672,8 @@ function renderHistory() {
       </div>
       <div class="sec-title">アカウント</div>
       ${accountCard()}
+      <div class="sec-title">通知</div>
+      ${notifCard()}
       <div class="sec-title">設定</div>
       <div class="card switch"><b>音声ガイド</b>
         <button class="tab ${db.settings.voice ? 'on' : ''}" data-act="voice-set">${db.settings.voice ? 'ON' : 'OFF'}</button></div>
@@ -717,9 +719,12 @@ function openAccounts() { acctManage = false; view = 'accounts'; render(); loadA
 async function pickAccount(id) {
   const u = (accts || []).find(x => x.id === id);
   if (!u) return;
+  const oldId = online() ? session.id : null;
   if (online()) await syncNow();
   setSession({ id: u.id, name: u.name });
+  pushState = null;
   db = load(); view = 'home'; render();
+  followPushToAccount(oldId, u.id);
   toast(`${u.name}さんで始めます`);
   pullFromServer();
 }
@@ -828,6 +833,7 @@ function renderMemberList() {
       ${avatar(u)}
       <div class="prog-body"><div class="prog-name">${esc(u.name)} ${u.id === session.id ? '<span class="badge mix">あなた</span>' : ''}</div>
         <div class="prog-meta">@${esc(u.id)}・合計${u.summary.total}回・最終 ${ago(u.summary.lastAt)}</div></div>
+      ${nudgeBtn(u)}
       <div class="m-streak ${st ? '' : 'off'}">🔥${st}</div>
     </div>`;
   }).join('');
@@ -876,7 +882,7 @@ function renderMember() {
   }).join('') || '<div class="empty">まだ記録がありません</div>';
   app.innerHTML = back + `
     <div class="wrap">
-      <div class="card profile">${avatar(u, true)}<div><div class="p-name">${esc(u.name)} ${me ? '<span class="badge mix">あなた</span>' : ''}</div><div class="muted">@${esc(u.id)}</div></div></div>
+      <div class="card profile">${avatar(u, true)}<div style="flex:1;min-width:0"><div class="p-name">${esc(u.name)} ${me ? '<span class="badge mix">あなた</span>' : ''}</div><div class="muted">@${esc(u.id)}</div></div>${nudgeBtn({ ...u, pushOn: (members || []).some(x => x.id === u.id && x.pushOn) })}</div>
       <div class="tiles" style="margin-top:12px">
         <div class="card tile"><div class="v" style="color:var(--orange)">🔥 ${streak(days)}</div><div class="k">現在の連続日数</div></div>
         <div class="card tile"><div class="v">🏆 ${bestStreak(days)}</div><div class="k">最高連続日数</div></div>
@@ -896,6 +902,131 @@ async function copyProgram(pid) {
   if (!(await confirmDlg('自分のメニューに追加', `${member.user.name}さんの「${p.name}」（${p.items.length}種目）を自分のメニューに追加しますか？`, '追加する'))) return;
   db.programs.unshift({ id: uid(), name: p.name, items: p.items.map(i => ({ ...i, id: uid() })), from: { id: member.user.id, name: member.user.name } });
   save(); toast(`「${p.name}」を追加しました`);
+}
+
+/* ---------------- 通知（つつく・毎日のリマインド） ---------------- */
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isStandalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+let pushState = null;   // { devices, reminder, thisDevice } / { error }
+async function sha256hex(s) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function b64ToUint8(b64) {
+  const s = atob((b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, c => c.charCodeAt(0));
+}
+async function currentSub() {
+  if (!pushSupported()) return null;
+  try { const reg = await navigator.serviceWorker.getRegistration(); return reg ? await reg.pushManager.getSubscription() : null; }
+  catch (e) { return null; }
+}
+async function loadPushState() {
+  if (!online()) return;
+  const id = session.id;
+  try {
+    const s = await currentSub();
+    const r = await api(userUrl(id) + '/push?ep=' + (s ? await sha256hex(s.endpoint) : ''));
+    if (online() && session.id === id) pushState = r;
+  } catch (e) { pushState = { error: e.message }; }
+  if (view === 'history') render();
+}
+async function registerThisDevice(id) {
+  const reg = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;
+  const { publicKey } = await api('/api/push/key');
+  let s = await reg.pushManager.getSubscription();
+  if (!s) s = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToUint8(publicKey) });
+  await api(userUrl(id) + '/push', { method: 'PUT', body: { subscription: s.toJSON() } });
+  lsSet('badtore.pushFor', id);
+}
+async function enablePush() {
+  if (!pushSupported()) {
+    toast(isIOS && !isStandalone() ? 'iPhoneは「ホーム画面に追加」したアプリから設定してください' : 'この端末・ブラウザは通知に対応していません');
+    return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('通知が許可されませんでした。端末の設定でこのアプリの通知を許可してください'); return; }
+  try { await registerThisDevice(session.id); toast('通知をオンにしました'); }
+  catch (e) { toast('通知をオンにできませんでした：' + e.message); }
+  loadPushState();
+}
+async function disablePush() {
+  const s = await currentSub();
+  if (s) {
+    try { await api(userUrl(session.id) + '/push', { method: 'DELETE', body: { endpoint: s.endpoint } }); } catch (e) {}
+    try { await s.unsubscribe(); } catch (e) {}
+  }
+  lsSet('badtore.pushFor', null);
+  toast('この端末の通知をオフにしました');
+  loadPushState();
+}
+async function testPush() {
+  try { await api(userUrl(session.id) + '/push/test', { method: 'POST' }); toast('テスト通知を送りました'); }
+  catch (e) { toast(e.message); }
+}
+async function setReminder(enabled, hour) {
+  try {
+    const r = await api(userUrl(session.id) + '/reminder', { method: 'PUT', body: { enabled, hour } });
+    pushState = { ...(pushState || {}), reminder: r.reminder };
+    render(); toast(enabled ? `今日まだのときは、毎日${hour}時にお知らせします` : '毎日のリマインドをオフにしました');
+  } catch (e) { toast(e.message); }
+}
+// アカウントを切り替えたら、この端末の通知の届け先も切り替える
+async function followPushToAccount(oldId, newId) {
+  const was = lsGet('badtore.pushFor');
+  if (!was || was === newId || !pushSupported() || Notification.permission !== 'granted') return;
+  const s = await currentSub();
+  if (!s) return;
+  try { await api(userUrl(was) + '/push', { method: 'DELETE', body: { endpoint: s.endpoint } }); } catch (e) {}
+  try { await registerThisDevice(newId); } catch (e) {}
+}
+function notifCard() {
+  if (!online()) return `<div class="card acct"><div class="muted">アカウントを選ぶと、通知（つつく・毎日のリマインド）を使えます。</div></div>`;
+  if (!pushState) { loadPushState(); return `<div class="card acct"><div class="muted">読み込み中…</div></div>`; }
+  const r = pushState.reminder || { enabled: true, hour: 20 };
+  const hours = [17, 18, 19, 20, 21, 22];
+  let dev;
+  if (pushState.thisDevice) {
+    dev = `<div class="card acct"><div style="flex:1"><b>✅ この端末に通知が届きます</b>
+      <div class="muted">友だちからの「つつく」と、毎日のリマインドが届きます</div></div></div>
+      <div class="legacy-btns" style="margin-top:10px"><button class="btn white small" data-act="push-test">テスト通知</button>
+      <button class="btn red small" data-act="push-off">オフにする</button></div>`;
+  } else if (isIOS && !isStandalone()) {
+    dev = `<div class="card acct"><div style="flex:1"><b>🔔 iPhoneで通知を受け取るには</b>
+      <div class="muted" style="line-height:1.7">① Safariの共有ボタン（□↑）→「ホーム画面に追加」<br>② ホーム画面の KOSO REN アイコンから開く<br>③ この画面で「通知をオンにする」</div></div></div>`;
+  } else {
+    dev = `<div class="card acct"><div style="flex:1"><b>🔔 通知はオフです</b>
+      <div class="muted">オンにすると、友だちからの「つつく」と毎日のリマインドが届きます</div></div></div>
+      <div class="acct-btns"><button class="btn blue" data-act="push-on">通知をオンにする</button></div>`;
+  }
+  const rem = pushState.devices > 0 ? `<div class="card switch" style="margin-top:12px"><div><b>毎日のリマインド</b><div class="muted">その日まだトレーニングしていないときだけ届きます</div></div>
+      <select class="input sel" data-act="reminder-hour" aria-label="毎日のリマインドの時刻">
+        <option value="off" ${!r.enabled ? 'selected' : ''}>なし</option>
+        ${hours.map(h => `<option value="${h}" ${r.enabled && r.hour === h ? 'selected' : ''}>${h}:00</option>`).join('')}
+      </select></div>` : '';
+  return dev + rem;
+}
+let nudgedToday = new Set();
+async function nudge(id) {
+  const u = (members || []).find(x => x.id === id) || (member && member.user && member.user.id === id ? member.user : null);
+  const name = u ? u.name : id;
+  try {
+    await api(userUrl(id) + '/nudge', { method: 'POST', body: { from: session.id } });
+    nudgedToday.add(`${dayKey()}:${id}`);
+    toast(`👉 ${name}さんをつつきました`);
+  } catch (e) {
+    if (e.status === 429) nudgedToday.add(`${dayKey()}:${id}`);
+    toast(e.message);
+  }
+  if (view === 'members') renderMemberList(); else if (view === 'member') renderMember();
+}
+function nudgeBtn(u) {
+  if (!online() || u.id === session.id) return '';
+  if ((u.summary.days || []).includes(dayKey())) return `<span class="nudge done" title="今日は練習済み">✓今日済</span>`;
+  if (nudgedToday.has(`${dayKey()}:${u.id}`)) return `<span class="nudge done">つついた</span>`;
+  return `<button class="nudge ${u.pushOn ? '' : 'off'}" data-act="nudge" data-id="${esc(u.id)}" aria-label="${esc(u.name)}さんをつつく">👉 つつく</button>`;
 }
 
 /* ---------------- events ---------------- */
@@ -969,14 +1100,27 @@ app.addEventListener('click', e => {
         .then(ok => { if (ok) { db.history = db.history.filter(x => x.id !== id); save(); render(); toast('記録を削除しました'); } });
       break;
     }
+    case 'nudge': nudge(id); break;
+    case 'push-on': enablePush(); break;
+    case 'push-off': disablePush(); break;
+    case 'push-test': testPush(); break;
     case 'cal': calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + +id, 1); render(); break;
   }
+});
+
+app.addEventListener('change', e => {
+  const t = e.target.closest('[data-act="reminder-hour"]');
+  if (t) setReminder(t.value !== 'off', t.value === 'off' ? ((pushState && pushState.reminder && pushState.reminder.hour) || 20) : Number(t.value));
 });
 
 if (!session) view = 'accounts';
 render();
 if (!session) loadAccounts();
 pullFromServer();
+// 通知を許可済みの端末は、起動のたびに届け先を最新にしておく
+if (online() && lsGet('badtore.pushFor') === session.id && pushSupported() && Notification.permission === 'granted') {
+  registerThisDevice(session.id).catch(() => {});
+}
 
 /* ---------------- PWA ---------------- */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !window.__NO_SW__) {

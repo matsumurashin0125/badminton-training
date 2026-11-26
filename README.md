@@ -26,11 +26,34 @@ GitHub に push すると Cloud Run に自動デプロイされます。
 
 > パスワードがないので、URLを知っている人は誰でもアカウントを選んだり削除したりできます。チーム内だけで共有してください。
 
+## 通知（つつく・毎日のリマインド）
+- **👉 つつく**：「みんな」タブで相手の「つつく」を押すと、その人のスマホに通知が届きます（同じ相手には1日1回まで。今日もう練習した人・通知オフの人には送れません）
+- **毎日のリマインド**：決めた時刻（17〜22時、初期値20時）に、その日まだトレーニングしていない人へ自動で通知（1日1回）
+- 受け取る人は、記録画面の「通知」→「通知をオンにする」で許可します
+  - **iPhone**：iOS 16.4以降。Safariの共有ボタン →「ホーム画面に追加」→ そのアイコンから開いて設定（Safariのままでは届きません）
+  - **Android**：Chromeならそのまま設定できます
+- 通知用の鍵（VAPID）は初回に自動で作られ、バケットの `config/vapid.json` に保存されます
+- アカウントを切り替えると、その端末の通知の届け先も切り替わります
+
+### 毎日のリマインドに必要な設定（Cloud Scheduler）
+毎時0分に `/api/cron/reminders` を呼ぶジョブを1つ作ります（つつくだけなら不要）。
+
+```bash
+gcloud services enable cloudscheduler.googleapis.com --project ramen-log-515610
+gcloud scheduler jobs create http koso-ren-reminders --project ramen-log-515610 \
+  --location asia-northeast1 --schedule "0 * * * *" --time-zone "Asia/Tokyo" \
+  --uri "https://badminton-training-698636063892.asia-northeast1.run.app/api/cron/reminders" \
+  --http-method POST
+```
+
+コンソールなら：Cloud Scheduler →「ジョブを作成」→ リージョン `asia-northeast1`、頻度 `0 * * * *`、タイムゾーン「日本標準時」→ ターゲット HTTP、URL は上記、メソッド POST。
+（任意）Cloud Run に環境変数 `CRON_SECRET` を設定した場合は、ジョブのヘッダーに `X-Cron-Secret: <同じ値>` を追加してください。
+
 ## フォルダ構成
 ```
 server.js          サーバー（静的配信＋API）。Cloud Run では Cloud Storage、ローカルでは data/db.json に保存
 public/            アプリ画面（HTML/CSS/JS、PWA）
-package.json       依存ライブラリ（@google-cloud/storage）
+package.json       依存ライブラリ（@google-cloud/storage、web-push）
 Dockerfile         Cloud Run 用イメージ（Node.js 22）
 ```
 
