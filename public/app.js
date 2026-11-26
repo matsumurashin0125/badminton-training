@@ -946,8 +946,9 @@ async function enablePush() {
     toast(isIOS && !isStandalone() ? 'iPhoneは「ホーム画面に追加」したアプリから設定してください' : 'この端末・ブラウザは通知に対応していません');
     return;
   }
+  lsSet('badtore.pushWanted', 1);
   const perm = await Notification.requestPermission();
-  if (perm !== 'granted') { toast('通知が許可されませんでした。端末の設定でこのアプリの通知を許可してください'); return; }
+  if (perm !== 'granted') { toast('通知が許可されませんでした。下の手順で許可してください'); pushState = null; loadPushState(); return; }
   try { await registerThisDevice(session.id); toast('通知をオンにしました'); }
   catch (e) { toast('通知をオンにできませんでした：' + e.message); }
   loadPushState();
@@ -958,7 +959,7 @@ async function disablePush() {
     try { await api(userUrl(session.id) + '/push', { method: 'DELETE', body: { endpoint: s.endpoint } }); } catch (e) {}
     try { await s.unsubscribe(); } catch (e) {}
   }
-  lsSet('badtore.pushFor', null);
+  lsSet('badtore.pushFor', null); lsSet('badtore.pushWanted', null);
   toast('この端末の通知をオフにしました');
   loadPushState();
 }
@@ -982,20 +983,119 @@ async function followPushToAccount(oldId, newId) {
   try { await api(userUrl(was) + '/push', { method: 'DELETE', body: { endpoint: s.endpoint } }); } catch (e) {}
   try { await registerThisDevice(newId); } catch (e) {}
 }
+// ---- 端末ごとの通知設定ガイド ----
+// ※ Webアプリから端末の設定画面を直接開くことはできないため、端末に合わせた手順を表示する
+function deviceEnv() {
+  const ua = navigator.userAgent;
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const android = /Android/.test(ua);
+  const m = ua.match(/OS (\d+)_(\d+)/);
+  const iosVer = m ? Number(m[1]) + Number(m[2]) / 100 : null;
+  const browser = /SamsungBrowser/.test(ua) ? 'samsung' : /EdgA|Edg\//.test(ua) ? 'edge' : /Firefox|FxiOS/.test(ua) ? 'firefox'
+    : /CriOS|Chrome/.test(ua) ? 'chrome' : /Safari/.test(ua) ? 'safari' : 'other';
+  return { ios, android, iosVer, browser, standalone: isStandalone() };
+}
+const steps = list => `<ol class="guide">${list.map(s => `<li>${s}</li>`).join('')}</ol>`;
+function blockedGuide(env) {
+  if (env.ios) {
+    return { title: 'iPhoneの設定で通知を許可してください', body: steps([
+      'ホーム画面に戻り、<b>「設定」</b>アプリを開く',
+      '<b>「通知」</b>をタップ',
+      'アプリの一覧から<b>「KOSO REN」</b>をタップ',
+      '<b>「通知を許可」</b>をオン',
+      'このアプリに戻る（自動でオンになります）',
+    ]) };
+  }
+  if (env.android && env.standalone) {
+    return { title: 'Androidの設定で通知を許可してください', body: steps([
+      'ホーム画面の<b>KOSO REN</b>アイコンを長押し',
+      '<b>「アプリ情報」</b>（ⓘ）をタップ',
+      '<b>「通知」</b>をタップして<b>オン</b>にする',
+      'このアプリに戻る（自動でオンになります）',
+    ]) + `<div class="muted">うまくいかないとき：Chromeの「⋮」→「設定」→「サイトの設定」→「通知」で、このサイトを「許可」にしてください。</div>` };
+  }
+  if (env.android && env.browser === 'samsung') {
+    return { title: 'Samsung Internetの設定で通知を許可してください', body: steps([
+      '画面下の<b>「≡」</b>→<b>「設定」</b>',
+      '<b>「サイトとダウンロード」</b>→<b>「通知」</b>',
+      'このサイトを<b>「許可」</b>にする',
+      'このページに戻る（自動でオンになります）',
+    ]) };
+  }
+  if (env.android) {
+    return { title: 'Chromeの設定で通知を許可してください', body: steps([
+      'アドレスバーの左にある<b>アイコン</b>（⚙ や 🔒）をタップ',
+      '<b>「権限」</b>または<b>「サイトの設定」</b>をタップ',
+      '<b>「通知」</b>を<b>「許可」</b>にする',
+      'このページに戻る（自動でオンになります）',
+    ]) };
+  }
+  return { title: 'ブラウザの設定で通知を許可してください', body: steps([
+    'アドレスバーの左にある<b>鍵アイコン</b>をクリック',
+    '<b>「通知」</b>を<b>「許可」</b>にする',
+    'ページを再読み込み',
+  ]) };
+}
+function troubleTips(env) {
+  if (env.ios) return steps([
+    '「設定」→「通知」→「KOSO REN」で、通知・ロック画面・バナーがオンか確認',
+    '集中モード（おやすみモードなど）がオンだと届きません',
+    'それでも届かないときは、ここで「オフにする」→「通知をオンにする」をやり直す',
+  ]);
+  if (env.android) return steps([
+    'Androidの「設定」→「アプリ」→<b>' + (env.standalone ? 'KOSO REN' : env.browser === 'samsung' ? 'Samsung Internet' : 'Chrome') + '</b>→「通知」がオンか確認',
+    '省電力・バッテリー最適化で通知が止まることがあります（「制限なし」にすると確実）',
+    'それでも届かないときは、ここで「オフにする」→「通知をオンにする」をやり直す',
+  ]);
+  return steps(['ブラウザとOSの通知設定がオンか確認', '「オフにする」→「通知をオンにする」をやり直す']);
+}
+async function recheckPush(silent) {
+  if (!online() || !pushSupported()) return;
+  if (Notification.permission === 'granted' && lsGet('badtore.pushWanted')) {
+    try { await registerThisDevice(session.id); if (!silent) toast('通知をオンにしました'); } catch (e) { if (!silent) toast('通知をオンにできませんでした：' + e.message); }
+  } else if (!silent) {
+    toast(Notification.permission === 'denied' ? 'まだ通知がブロックされています。上の手順で許可してください' : '「通知をオンにする」を押してください');
+  }
+  pushState = null; loadPushState();
+}
+// 設定アプリから戻ってきたら、許可されていれば自動で登録する
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && online() && pushSupported() && Notification.permission === 'granted'
+      && lsGet('badtore.pushWanted') && !(pushState && pushState.thisDevice)) recheckPush(true);
+});
+
 function notifCard() {
   if (!online()) return `<div class="card acct"><div class="muted">アカウントを選ぶと、通知（つつく・毎日のリマインド）を使えます。</div></div>`;
   if (!pushState) { loadPushState(); return `<div class="card acct"><div class="muted">読み込み中…</div></div>`; }
   const r = pushState.reminder || { enabled: true, hour: 22 };
   const hours = [17, 18, 19, 20, 21, 22];
+  const env = deviceEnv();
+  const perm = pushSupported() ? Notification.permission : 'unsupported';
   let dev;
   if (pushState.thisDevice) {
     dev = `<div class="card acct"><div style="flex:1"><b>✅ この端末に通知が届きます</b>
       <div class="muted">友だちからの「つつく」と、毎日のリマインドが届きます</div></div></div>
       <div class="legacy-btns" style="margin-top:10px"><button class="btn white small" data-act="push-test">テスト通知</button>
-      <button class="btn red small" data-act="push-off">オフにする</button></div>`;
-  } else if (isIOS && !isStandalone()) {
-    dev = `<div class="card acct"><div style="flex:1"><b>🔔 iPhoneで通知を受け取るには</b>
-      <div class="muted" style="line-height:1.7">① Safariの共有ボタン（□↑）→「ホーム画面に追加」<br>② ホーム画面の KOSO REN アイコンから開く<br>③ この画面で「通知をオンにする」</div></div></div>`;
+      <button class="btn red small" data-act="push-off">オフにする</button></div>
+      <details class="card tips"><summary>テスト通知が届かないときは</summary>${troubleTips(env)}</details>`;
+  } else if (env.ios && env.iosVer && env.iosVer < 16.4) {
+    dev = `<div class="card acct"><div style="flex:1"><b>🔔 iOSのアップデートが必要です</b>
+      <div class="muted">通知はiOS 16.4以降で使えます。「設定」→「一般」→「ソフトウェアアップデート」から更新してください。</div></div></div>`;
+  } else if (env.ios && !env.standalone) {
+    dev = `<div class="card acct guide-card"><div style="flex:1"><b>🔔 iPhoneで通知を受け取るには</b>${steps([
+      env.browser === 'safari' ? 'Safariの画面下の<b>共有ボタン</b>（□↑）をタップ' : 'このページを<b>Safari</b>で開き、共有ボタン（□↑）をタップ',
+      '<b>「ホーム画面に追加」</b>→<b>「追加」</b>',
+      'ホーム画面の<b>KOSO REN</b>アイコンから開く',
+      'この画面で<b>「通知をオンにする」</b>',
+    ])}</div></div>`;
+  } else if (perm === 'unsupported') {
+    dev = `<div class="card acct"><div style="flex:1"><b>🔔 このブラウザは通知に対応していません</b>
+      <div class="muted">${env.android ? '<b>Chrome</b>でこのページを開いてください。' : 'Chrome・Edge・Safariなどの最新版で開いてください。'}</div></div></div>`;
+  } else if (perm === 'denied') {
+    const g = blockedGuide(env);
+    dev = `<div class="card acct guide-card"><div style="flex:1"><b>🚫 通知がブロックされています</b>
+      <div class="guide-title">${g.title}</div>${g.body}</div></div>
+      <div class="acct-btns"><button class="btn blue" data-act="push-recheck">設定したので、もう一度確認する</button></div>`;
   } else {
     dev = `<div class="card acct"><div style="flex:1"><b>🔔 通知はオフです</b>
       <div class="muted">オンにすると、友だちからの「つつく」と毎日のリマインドが届きます</div></div></div>
@@ -1104,6 +1204,7 @@ app.addEventListener('click', e => {
     case 'push-on': enablePush(); break;
     case 'push-off': disablePush(); break;
     case 'push-test': testPush(); break;
+    case 'push-recheck': lsSet('badtore.pushWanted', 1); recheckPush(false); break;
     case 'cal': calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + +id, 1); render(); break;
   }
 });

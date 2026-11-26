@@ -229,3 +229,11 @@ input{font:inherit}
 .input.sel{width:auto;flex:none;padding:10px 12px;font-weight:800}
 .legacy-btns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
 .legacy-btns .btn{margin-top:0}
+
+/* ---------- notification guide ---------- */
+.guide{margin:10px 0 4px;padding-left:22px;line-height:1.75;font-size:14px}
+.guide li{margin-bottom:2px}
+.guide-title{font-weight:800;margin-top:8px;font-size:14px}
+.guide-card{border-color:var(--blue);background:#f2fbff}
+.tips{margin-top:12px;padding:12px 14px}
+.tips summary{font-weight:800;color:var(--blue-d);cursor:pointer}
