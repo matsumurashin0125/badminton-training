@@ -1008,16 +1008,13 @@ function notifCard() {
       </select></div>` : '';
   return dev + rem;
 }
-let nudgedToday = new Set();
 async function nudge(id) {
   const u = (members || []).find(x => x.id === id) || (member && member.user && member.user.id === id ? member.user : null);
   const name = u ? u.name : id;
   try {
     await api(userUrl(id) + '/nudge', { method: 'POST', body: { from: session.id } });
-    nudgedToday.add(`${dayKey()}:${id}`);
     toast(`👉 ${name}さんをつつきました`);
   } catch (e) {
-    if (e.status === 429) nudgedToday.add(`${dayKey()}:${id}`);
     toast(e.message);
   }
   if (view === 'members') renderMemberList(); else if (view === 'member') renderMember();
@@ -1025,7 +1022,6 @@ async function nudge(id) {
 function nudgeBtn(u) {
   if (!online() || u.id === session.id) return '';
   if ((u.summary.days || []).includes(dayKey())) return `<span class="nudge done" title="今日は練習済み">✓今日済</span>`;
-  if (nudgedToday.has(`${dayKey()}:${u.id}`)) return `<span class="nudge done">つついた</span>`;
   return `<button class="nudge ${u.pushOn ? '' : 'off'}" data-act="nudge" data-id="${esc(u.id)}" aria-label="${esc(u.name)}さんをつつく">👉 つつく</button>`;
 }
 
