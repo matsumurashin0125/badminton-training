@@ -202,7 +202,7 @@ function streakOf(days, today) {
   return n;
 }
 const pushDocName = id => `push/${id}`;
-const emptyPush = () => ({ subs: [], reminder: { enabled: true, hour: 20 }, nudges: {}, lastAutoDay: null });
+const emptyPush = () => ({ subs: [], reminder: { enabled: true, hour: 22 }, nudges: {}, lastAutoDay: null });
 async function getPush(id) { return Object.assign(emptyPush(), await store.getDoc(pushDocName(id))); }
 // 登録された全端末へ送る。無効になった端末(404/410)は登録から外す
 async function sendPush(id, payload) {

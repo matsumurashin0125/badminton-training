@@ -985,7 +985,7 @@ async function followPushToAccount(oldId, newId) {
 function notifCard() {
   if (!online()) return `<div class="card acct"><div class="muted">アカウントを選ぶと、通知（つつく・毎日のリマインド）を使えます。</div></div>`;
   if (!pushState) { loadPushState(); return `<div class="card acct"><div class="muted">読み込み中…</div></div>`; }
-  const r = pushState.reminder || { enabled: true, hour: 20 };
+  const r = pushState.reminder || { enabled: true, hour: 22 };
   const hours = [17, 18, 19, 20, 21, 22];
   let dev;
   if (pushState.thisDevice) {
@@ -1110,7 +1110,7 @@ app.addEventListener('click', e => {
 
 app.addEventListener('change', e => {
   const t = e.target.closest('[data-act="reminder-hour"]');
-  if (t) setReminder(t.value !== 'off', t.value === 'off' ? ((pushState && pushState.reminder && pushState.reminder.hour) || 20) : Number(t.value));
+  if (t) setReminder(t.value !== 'off', t.value === 'off' ? ((pushState && pushState.reminder && pushState.reminder.hour) || 22) : Number(t.value));
 });
 
 if (!session) view = 'accounts';
