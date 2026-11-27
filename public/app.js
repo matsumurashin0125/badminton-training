@@ -562,6 +562,7 @@ function startProgram(id) {
   const p = db.programs.find(x => x.id === id);
   if (!p || !p.items.length) return;
   unlockAudio(); requestWake();
+  if (p.items.some(isR6)) { try { const d = document.documentElement; (d.requestFullscreen || d.webkitRequestFullscreen)?.call(d, { navigationUI: 'hide' })?.catch?.(() => {}); } catch (e) {} }
   P = { p, phases: buildPhases(p), i: 0, end: 0, remain: 0, paused: false, lastSec: null, timer: null, startedAt: Date.now(), signals: 0, sigIdx: -1, sigHist: [] };
   view = 'player';
   app.innerHTML = `
@@ -580,10 +581,10 @@ function startProgram(id) {
         <div class="num" id="pl-num"></div>
         <div class="paused-tag" id="pl-paused" hidden>一時停止中</div>
       </div>
-      <div class="r6-wrap" id="pl-r6" hidden>
+      <div class="r6-wrap" id="pl-r6" data-act="pause" hidden>
         ${courtHtml(null, null)}
         <div class="r6-time" id="pl-r6time"></div>
-        <div class="r6-paused" id="pl-r6paused" hidden>一時停止中</div>
+        <div class="r6-paused" id="pl-r6paused" hidden><b>一時停止中</b><small>画面タップで再開</small></div>
       </div>
       <div class="ph-next" id="pl-next"></div>
       <div class="ph-step" id="pl-step"></div>
@@ -662,7 +663,7 @@ function tick() {
     const tempoMs = ph.item.tempo * 1000, elapsed = ph.sec * 1000 - rem, k = Math.floor(elapsed / tempoMs);
     if (k > P.sigIdx) { P.sigIdx = k; fireSignal(ph.item); }
     else if (elapsed - k * tempoMs > tempoMs - 150) lightCell(null);   // 同じ番号が続いても分かるよう、次の合図の直前に消す
-    if (s !== P.lastSec) { P.lastSec = s; document.getElementById('pl-r6time').textContent = `残り ${s}秒`; }
+    if (s !== P.lastSec) { P.lastSec = s; { const ph = P.phases[P.i]; document.getElementById('pl-r6time').textContent = `SET ${ph.set}/${ph.sets}・残り ${s}秒`; } }
     return;
   }
   const num = document.getElementById('pl-num');
@@ -706,11 +707,13 @@ function togglePause() {
   document.getElementById('pl-pause').textContent = P.paused ? '再開 ▶' : '一時停止';
   document.getElementById('pl-paused').hidden = !P.paused;
   document.getElementById('pl-r6paused').hidden = !P.paused;
+  document.getElementById('pl').classList.toggle('paused', P.paused);
 }
 function stopPlayer() {
   if (P) clearInterval(P.timer);
   try { speechSynthesis.cancel(); } catch (e) {}
   releaseWake(); P = null;
+  try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
 }
 function finishProgram() {
   const p = P.p, sec = Math.round((Date.now() - P.startedAt) / 1000), signals = P.signals || 0;
@@ -1190,7 +1193,7 @@ app.addEventListener('click', e => {
       break;
     // player
     case 'pause': togglePause(); break;
-    case 'skip': if (P && !P.paused) nextPhase(); break;
+    case 'skip': if (P) { if (P.paused) togglePause(); nextPhase(); } break;
     case 'quit':
       if (P && !P.paused) togglePause();
       confirmDlg('トレーニングを中止', '中止しますか？（記録は残りません）', '中止する', true)
