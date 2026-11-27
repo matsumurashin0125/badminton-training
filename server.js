@@ -135,7 +135,16 @@ const num = (v, min, max) => Math.min(max, Math.max(min, Math.round(Number(v) ||
 
 // クライアントから来たデータを整形（想定外の値を捨てる）
 function cleanItem(i) {
-  return { id: str(i.id, 20), category: i.category === 'foot' ? 'foot' : 'core', name: str(i.name, 40), sec: num(i.sec, 1, 3600), interval: num(i.interval, 0, 3600) };
+  const out = { id: str(i.id, 20), category: i.category === 'foot' ? 'foot' : 'core', name: str(i.name, 40), sec: num(i.sec, 1, 3600), interval: num(i.interval, 0, 3600) };
+  if (i.type === 'random6') {           // ランダム6点
+    const pts = [...new Set((Array.isArray(i.points) ? i.points : []).map(Number).filter(n => n >= 1 && n <= 6))].sort();
+    Object.assign(out, {
+      category: 'foot', type: 'random6', sets: num(i.sets, 1, 10), setRest: num(i.setRest, 0, 600),
+      tempo: Math.min(5, Math.max(0.8, Math.round((Number(i.tempo) || 2) * 10) / 10)),
+      points: pts.length >= 2 ? pts : [1, 2, 3, 4, 5, 6],
+    });
+  }
+  return out;
 }
 function cleanProgram(p) {
   const out = { id: str(p.id, 20), name: str(p.name, 40), items: (Array.isArray(p.items) ? p.items : []).slice(0, 50).map(cleanItem) };
@@ -148,6 +157,7 @@ function cleanData(d) {
     history: (Array.isArray(d.history) ? d.history : []).slice(-3000).map(h => ({
       id: str(h.id, 20), day: str(h.day, 10), at: num(h.at, 0, 9e15), programId: str(h.programId, 20),
       name: str(h.name, 40), sec: num(h.sec, 0, 86400), items: num(h.items, 0, 100),
+      ...(h.signals ? { signals: num(h.signals, 0, 100000) } : {}),
     })).filter(h => /^\d{4}-\d{2}-\d{2}$/.test(h.day)),
     settings: { voice: !(d.settings && d.settings.voice === false) },
   };

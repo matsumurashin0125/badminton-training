@@ -152,7 +152,7 @@ function bestStreak(set = doneDays()) {
   return best;
 }
 const fmt = sec => { const m = Math.floor(sec / 60), s = sec % 60; return m ? `${m}分${s ? s + '秒' : ''}` : `${s}秒`; };
-const totalSec = p => p.items.reduce((a, it, i) => a + it.sec + (i < p.items.length - 1 ? (it.interval || 0) : 0), PREP_SEC);
+const totalSec = p => p.items.reduce((a, it, i) => a + (it.type === 'random6' ? it.sets * it.sec + (it.sets - 1) * (it.setRest || 0) : it.sec) + (i < p.items.length - 1 ? (it.interval || 0) : 0), PREP_SEC);
 const progCat = p => { const c = new Set(p.items.map(i => i.category)); return c.size === 1 ? [...c][0] : 'mix'; };
 
 /* ---------------- audio / voice ---------------- */
@@ -353,7 +353,21 @@ function openEditor(id) {
   };
   view = 'editor'; render();
 }
-function blankForm(category = 'core') { return { category, name: '', sec: 30, useInt: true, intSec: 15 }; }
+function blankForm(category = 'core') {
+  return { category, name: '', sec: 30, useInt: true, intSec: 15, kind: 'normal', sets: 3, tempo: 2.0, setRest: 30, points: [1, 2, 3, 4, 5, 6] };
+}
+const keepScroll = fn => { const y = window.scrollY; fn(); window.scrollTo(0, y); };
+/* ---- ランダム6点 ---- */
+const R6_ALL = [1, 2, 3, 4, 5, 6];
+const R6_PRESETS = [['all', '6点ぜんぶ', R6_ALL], ['front', '前の2点', [1, 4]], ['back', '後ろの2点', [3, 6]], ['side', '横の2点', [2, 5]], ['corner', '四隅', [1, 3, 4, 6]]];
+const isR6 = it => it && it.type === 'random6';
+const r6Sec = it => it.sets * it.sec + (it.sets - 1) * (it.setRest || 0);
+const r6Sub = it => `${it.sets}セット×${it.sec}秒・${Number(it.tempo).toFixed(1)}秒ごと${(it.points || R6_ALL).length < 6 ? `・${(it.points || R6_ALL).join('')}番` : ''}`;
+// 左列 1・2・3、右列 4・5・6、上がネット側
+function courtHtml(lit, points, small) {
+  const cell = n => `<div class="r6-cell ${lit === n ? 'lit' : ''} ${points && !points.includes(n) ? 'off' : ''}" data-n="${n}">${n}</div>`;
+  return `<div class="r6-court ${small ? 'small' : ''}">${[1, 4, 2, 5, 3, 6].map(cell).join('')}</div>`;
+}
 function readForm() {
   const f = E.form;
   const q = s => app.querySelector(s);
@@ -361,6 +375,9 @@ function readForm() {
   if (q('#f-sec')) f.sec = Math.max(0, parseInt(q('#f-sec').value, 10) || 0);
   if (q('#f-int')) f.intSec = Math.max(0, parseInt(q('#f-int').value, 10) || 0);
   if (q('#p-name')) E.name = q('#p-name').value.trim();
+  if (q('#f-sets')) f.sets = Math.min(10, Math.max(1, parseInt(q('#f-sets').value, 10) || 1));
+  if (q('#f-tempo')) f.tempo = Math.round(Math.min(5, Math.max(0.8, parseFloat(q('#f-tempo').value) || 2)) * 10) / 10;
+  if (q('#f-srest')) f.setRest = Math.min(600, Math.max(0, parseInt(q('#f-srest').value, 10) || 0));
 }
 function renderEditor() {
   const f = E.form;
@@ -369,7 +386,7 @@ function renderEditor() {
     <div class="card item ${E.editIndex === i ? 'editing' : ''}" data-act="edit-item" data-id="${i}">
       <div class="item-n">${i + 1}</div>
       <div class="item-body"><div class="item-name">${esc(it.name)}</div>
-        <div class="item-sub"><span class="badge ${it.category}">${CAT[it.category].label}</span>　${it.sec}秒${E.editIndex === i ? '　<b class="edit-tag">編集中</b>' : ''}</div></div>
+        <div class="item-sub"><span class="badge ${it.category}">${isR6(it) ? '🎯 ランダム6点' : CAT[it.category].label}</span>　${isR6(it) ? r6Sub(it) : `${it.sec}秒`}${E.editIndex === i ? '　<b class="edit-tag">編集中</b>' : ''}</div></div>
       <button data-act="edit-item" data-id="${i}" aria-label="編集">✎</button>
       <button data-act="up" data-id="${i}" aria-label="上へ" ${i === 0 ? 'disabled' : ''}>▲</button>
       <button data-act="down" data-id="${i}" aria-label="下へ" ${i === E.items.length - 1 ? 'disabled' : ''}>▼</button>
@@ -393,16 +410,43 @@ function renderEditor() {
             <button class="core ${f.category === 'core' ? 'on' : ''}" data-act="cat" data-id="core">🧘 体幹</button>
             <button class="foot ${f.category === 'foot' ? 'on' : ''}" data-act="cat" data-id="foot">🏸 フットワーク</button>
           </div></div>
+        ${f.category === 'foot' ? `<div class="field"><label>やり方</label>
+          <div class="seg">
+            <button class="plain ${f.kind !== 'random6' ? 'on' : ''}" data-act="kind" data-id="normal">⏱ カウントダウン</button>
+            <button class="plain ${f.kind === 'random6' ? 'on' : ''}" data-act="kind" data-id="random6">🎯 ランダム6点</button>
+          </div>
+          ${f.kind === 'random6' ? '<div class="muted" style="margin-top:6px">光った番号の位置へ動いてセンターに戻る。合図はランダムに出ます</div>' : ''}</div>` : ''}
         <div class="field"><label>メニュー名</label>
-          <input id="f-name" class="input" placeholder="メニュー名を入力" value="${esc(f.name)}">
-          <div class="chips">${PRESETS[f.category].map(n => `<button class="chip" data-act="preset" data-id="${esc(n)}">${esc(n)}</button>`).join('')}</div>
+          <input id="f-name" class="input" placeholder="${f.kind === 'random6' ? 'ランダム6点' : 'メニュー名を入力'}" value="${esc(f.name)}">
+          ${f.kind === 'random6' ? '' : `<div class="chips">${PRESETS[f.category].map(n => `<button class="chip" data-act="preset" data-id="${esc(n)}">${esc(n)}</button>`).join('')}</div>`}
         </div>
-        <div class="field"><label>秒数</label>
+        ${f.kind === 'random6' ? `
+        <div class="field"><label>セット数</label>
+          <div class="stepper"><button data-act="sets" data-id="-1">−</button>
+            <input id="f-sets" class="input" type="number" inputmode="numeric" min="1" max="10" value="${f.sets}">
+            <button data-act="sets" data-id="1">＋</button></div></div>` : ''}
+        <div class="field"><label>${f.kind === 'random6' ? '1セットの秒数' : '秒数'}</label>
           <div class="stepper"><button data-act="sec" data-id="-5">−</button>
             <input id="f-sec" class="input" type="number" inputmode="numeric" min="1" value="${f.sec}">
             <button data-act="sec" data-id="5">＋</button></div>
           <div class="quick">${[20, 30, 45, 60, 90].map(s => `<button data-act="sec-set" data-id="${s}">${s}秒</button>`).join('')}</div>
         </div>
+        ${f.kind === 'random6' ? `
+        <div class="field"><label>合図の間隔（秒）</label>
+          <div class="stepper"><button data-act="tempo" data-id="-0.1">−</button>
+            <input id="f-tempo" class="input" type="number" inputmode="decimal" step="0.1" min="0.8" max="5" value="${Number(f.tempo).toFixed(1)}">
+            <button data-act="tempo" data-id="0.1">＋</button></div>
+          <div class="quick">${[1.0, 1.5, 2.0, 2.5, 3.0].map(t => `<button data-act="tempo-set" data-id="${t}">${t.toFixed(1)}</button>`).join('')}</div>
+          <div class="muted" style="margin-top:6px">小さいほど速い（0.8〜5.0秒）</div></div>
+        <div class="field"><label>セット間の休憩（秒）</label>
+          <div class="stepper"><button data-act="srest" data-id="-5">−</button>
+            <input id="f-srest" class="input" type="number" inputmode="numeric" min="0" value="${f.setRest}">
+            <button data-act="srest" data-id="5">＋</button></div>
+          <div class="quick">${[0, 15, 30, 45, 60].map(s => `<button data-act="srest-set" data-id="${s}">${s ? s + '秒' : 'なし'}</button>`).join('')}</div></div>
+        <div class="field"><label>使う点（タップで切り替え）</label>
+          <div class="r6-pick">${courtHtml(null, f.points, true).replace(/class="r6-cell/g, 'data-act="pt-toggle" class="r6-cell').replace(/data-n="(\d)"/g, 'data-id="$1"')}
+            <div class="chips r6-presets">${R6_PRESETS.map(([k, label, pts]) => `<button class="chip ${pts.join() === f.points.join() ? 'on' : ''}" data-act="pt-preset" data-id="${k}">${label}</button>`).join('')}</div>
+          </div></div>` : ''}
         <div class="field" style="margin-bottom:${f.useInt ? 14 : 0}px"><label>次のメニューまでのインターバル</label>
           <div class="seg">
             <button class="plain ${!f.useInt ? 'on' : ''}" data-act="int" data-id="0">なし</button>
@@ -429,12 +473,17 @@ function renderEditor() {
 function formToItem() {
   readForm();
   const f = E.form;
+  if (f.category === 'foot' && f.kind === 'random6') {
+    if (f.sec <= 0 || f.points.length < 2) return null;
+    return { id: uid(), category: 'foot', type: 'random6', name: f.name || 'ランダム6点', sec: f.sec, interval: f.useInt ? f.intSec : 0,
+      sets: f.sets, tempo: f.tempo, setRest: f.setRest, points: f.points.slice().sort() };
+  }
   if (!f.name || f.sec <= 0) return null;
   return { id: uid(), category: f.category, name: f.name, sec: f.sec, interval: f.useInt ? f.intSec : 0 };
 }
 function addNext() {
   const it = formToItem();
-  if (!it) { toast('メニュー名と秒数を入力してください'); return; }
+  if (!it) { toast(E.form.kind === 'random6' ? '秒数を入れて、使う点を2つ以上選んでください' : 'メニュー名と秒数を入力してください'); return; }
   E.items.push(it);
   E.form.name = '';
   render();
@@ -444,7 +493,8 @@ function startEditItem(i) {
   readForm();
   const it = E.items[i];
   E.editIndex = i;
-  E.form = { category: it.category, name: it.name, sec: it.sec, useInt: it.interval > 0, intSec: it.interval || 15 };
+  E.form = { ...blankForm(it.category), category: it.category, name: it.name, sec: it.sec, useInt: it.interval > 0, intSec: it.interval || 15 };
+  if (isR6(it)) Object.assign(E.form, { kind: 'random6', sets: it.sets, tempo: it.tempo, setRest: it.setRest, points: (it.points || R6_ALL).slice() });
   render();
   setTimeout(() => { const el = document.getElementById('form-title'); el && el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
 }
@@ -492,7 +542,12 @@ function finishEdit() {
 function buildPhases(p) {
   const ph = [{ type: 'prep', sec: PREP_SEC, item: p.items[0], idx: 0, first: true }];
   p.items.forEach((item, i) => {
-    ph.push({ type: 'work', sec: item.sec, item, idx: i });
+    if (isR6(item)) {          // ランダム6点：セットの数だけくり返し、間にセット間の休憩
+      for (let k = 1; k <= item.sets; k++) {
+        ph.push({ type: 'work', sec: item.sec, item, idx: i, set: k, sets: item.sets });
+        if (k < item.sets && item.setRest > 0) ph.push({ type: 'rest', sec: item.setRest, item, idx: i, setRest: true, set: k, sets: item.sets });
+      }
+    } else ph.push({ type: 'work', sec: item.sec, item, idx: i });
     const nx = p.items[i + 1];
     if (!nx) return;
     if (item.interval > 0) ph.push({ type: 'rest', sec: item.interval, item: nx, idx: i + 1 });
@@ -507,7 +562,7 @@ function startProgram(id) {
   const p = db.programs.find(x => x.id === id);
   if (!p || !p.items.length) return;
   unlockAudio(); requestWake();
-  P = { p, phases: buildPhases(p), i: 0, end: 0, remain: 0, paused: false, lastSec: null, timer: null, startedAt: Date.now() };
+  P = { p, phases: buildPhases(p), i: 0, end: 0, remain: 0, paused: false, lastSec: null, timer: null, startedAt: Date.now(), signals: 0, sigIdx: -1, sigHist: [] };
   view = 'player';
   app.innerHTML = `
     <div class="player prep" id="pl">
@@ -525,6 +580,11 @@ function startProgram(id) {
         <div class="num" id="pl-num"></div>
         <div class="paused-tag" id="pl-paused" hidden>一時停止中</div>
       </div>
+      <div class="r6-wrap" id="pl-r6" hidden>
+        ${courtHtml(null, null)}
+        <div class="r6-time" id="pl-r6time"></div>
+        <div class="r6-paused" id="pl-r6paused" hidden>一時停止中</div>
+      </div>
       <div class="ph-next" id="pl-next"></div>
       <div class="ph-step" id="pl-step"></div>
       <div class="ctrls">
@@ -541,14 +601,22 @@ function enterPhase(i) {
   P.end = performance.now() + ph.sec * 1000;
   P.lastSec = null;
   const pl = document.getElementById('pl');
-  pl.className = 'player ' + ph.type;
-  document.getElementById('pl-label').textContent = ph.type === 'prep' ? (ph.first ? 'まもなく開始' : '次のメニュー') : ph.type === 'work' ? (CAT[ph.item.category].label) : 'インターバル';
-  document.getElementById('pl-name').textContent = ph.type === 'rest' ? '休憩' : ph.item.name;
-  const nextWork = P.p.items[ph.type === 'work' ? ph.idx + 1 : ph.idx];
+  const r6 = ph.type === 'work' && isR6(ph.item);
+  pl.className = 'player ' + ph.type + (r6 ? ' r6' : '');
+  document.querySelector('#pl .ring').hidden = r6;
+  document.getElementById('pl-r6').hidden = !r6;
+  if (r6) { P.sigIdx = -1; P.sigHist = []; lightCell(null); }
+  document.getElementById('pl-label').textContent = ph.type === 'prep' ? (ph.first ? 'まもなく開始' : '次のメニュー')
+    : ph.type === 'work' ? (r6 ? '🎯 ランダム6点' : CAT[ph.item.category].label) : ph.setRest ? 'セット間の休憩' : 'インターバル';
+  document.getElementById('pl-name').textContent = r6 ? `SET ${ph.set}/${ph.sets}` : ph.setRest ? `次は SET ${ph.set + 1}/${ph.sets}` : ph.type === 'rest' ? '休憩' : ph.item.name;
+  const nextWork = P.p.items[ph.type === 'work' || ph.setRest ? ph.idx + 1 : ph.idx];
+  const descr = it => isR6(it) ? `${it.sets}セット×${it.sec}秒` : `${it.sec}秒`;
   document.getElementById('pl-next').textContent =
-    ph.type === 'work' ? (nextWork ? `次：${nextWork.name}` : 'これがラスト！') : `次：${ph.item.name}（${ph.item.sec}秒）`;
+    r6 && ph.set < ph.sets ? `このあと SET ${ph.set + 1}/${ph.sets}`
+    : ph.setRest ? `${ph.item.name}・${Number(ph.item.tempo).toFixed(1)}秒ごと`
+    : ph.type === 'work' ? (nextWork ? `次：${nextWork.name}` : 'これがラスト！') : `次：${ph.item.name}（${descr(ph.item)}）`;
   document.getElementById('pl-step').textContent = `${ph.idx + 1} / ${P.p.items.length} 種目`;
-  const done = P.phases.slice(0, i).filter(x => x.type === 'work').length;
+  const done = P.phases.slice(0, i).filter(x => x.type === 'work' && (!x.sets || x.set === x.sets)).length;
   document.getElementById('pl-bar').style.width = (done / P.p.items.length * 100) + '%';
   onPhaseStart(ph);
   tick();
@@ -557,10 +625,16 @@ function onPhaseStart(ph) {
   vib(ph.type === 'work' ? [200] : [80]);
   if (ph.type === 'prep') {
     beep(520, 0.15);
-    speak(ph.first ? `${ph.item.name}、${ph.item.sec}秒。準備してください` : `終了。次は、${ph.item.name}、${ph.item.sec}秒`, true);
+    const d = isR6(ph.item) ? `${ph.item.sets}セット` : `${ph.item.sec}秒`;
+    speak(ph.first ? `${ph.item.name}、${d}。${isR6(ph.item) ? 'センターで構えてください' : '準備してください'}` : `終了。次は、${ph.item.name}、${d}`, true);
+  } else if (ph.type === 'work' && isR6(ph.item)) {
+    beep(1200, 0.25, 0.3);          // 読み上げは最初の合図の番号で行う
   } else if (ph.type === 'work') {
     beep(1200, 0.35, 0.35);
     speak(ph.chain ? ph.item.name : 'スタート', true);   // 続けて始まる種目は名前で知らせる
+  } else if (ph.setRest) {
+    beep(520, 0.3);
+    speak(`セット${ph.set}、終了。休憩、${ph.sec}秒`, true);
   } else {
     beep(520, 0.3);
     speak(ph.sec > REST_COUNT_FROM + 2 ? `終了。インターバル、${ph.sec}秒。次は、${ph.item.name}` : 'インターバル', true);
@@ -569,6 +643,8 @@ function onPhaseStart(ph) {
 function onSecond(ph, s) {
   if (ph.type === 'prep') {
     if (s <= 3) countVoice(s); else beep(440, 0.06, 0.15);
+  } else if (ph.type === 'work' && isR6(ph.item)) {
+    // 合図の読み上げとかぶるので、残り秒数の読み上げはしない
   } else if (ph.type === 'work') {
     if (s <= WORK_COUNT_FROM) countVoice(s);
     else if (s === 10 && ph.sec >= 20) speak(ph.nextChain ? `ラスト10秒。次は、${ph.nextChain.name}` : 'ラスト10秒', true);
@@ -582,6 +658,13 @@ function tick() {
   if (rem <= 0) { nextPhase(); return; }
   const ph = P.phases[P.i];
   const s = Math.ceil(rem / 1000);
+  if (ph.type === 'work' && isR6(ph.item)) {
+    const tempoMs = ph.item.tempo * 1000, elapsed = ph.sec * 1000 - rem, k = Math.floor(elapsed / tempoMs);
+    if (k > P.sigIdx) { P.sigIdx = k; fireSignal(ph.item); }
+    else if (elapsed - k * tempoMs > tempoMs - 150) lightCell(null);   // 同じ番号が続いても分かるよう、次の合図の直前に消す
+    if (s !== P.lastSec) { P.lastSec = s; document.getElementById('pl-r6time').textContent = `残り ${s}秒`; }
+    return;
+  }
   const num = document.getElementById('pl-num');
   if (s !== P.lastSec) {
     if (P.lastSec !== null) onSecond(ph, s);   // フェーズ開始直後は開始アナウンスを優先
@@ -590,6 +673,26 @@ function tick() {
     num.classList.remove('beat'); void num.offsetWidth; num.classList.add('beat');
   }
   document.getElementById('pl-ring').setAttribute('stroke-dashoffset', C * (1 - rem / (ph.sec * 1000)));
+}
+const R6_KANA = ['', 'いち', 'に', 'さん', 'よん', 'ご', 'ろく'];
+function lightCell(n) {
+  document.querySelectorAll('#pl-r6 .r6-cell').forEach(c => {
+    const on = Number(c.dataset.n) === n;
+    if (on) { c.classList.remove('lit'); void c.offsetWidth; }
+    c.classList.toggle('lit', on);
+  });
+}
+// ランダムに1点を選んで光らせる（同じ番号は3回続けない）
+function fireSignal(item) {
+  const pts = (item.points && item.points.length >= 2) ? item.points : R6_ALL;
+  const h = P.sigHist;
+  let n;
+  do { n = pts[Math.floor(Math.random() * pts.length)]; } while (h.length >= 2 && h.at(-1) === n && h.at(-2) === n);
+  h.push(n); if (h.length > 2) h.shift();
+  P.signals++;
+  lightCell(n);
+  beep(980, 0.08, 0.3); vib(60);
+  speak(R6_KANA[n], true);
 }
 function nextPhase() {
   if (P.i + 1 >= P.phases.length) { finishProgram(); return; }
@@ -602,6 +705,7 @@ function togglePause() {
   else { P.end = performance.now() + P.remain; }
   document.getElementById('pl-pause').textContent = P.paused ? '再開 ▶' : '一時停止';
   document.getElementById('pl-paused').hidden = !P.paused;
+  document.getElementById('pl-r6paused').hidden = !P.paused;
 }
 function stopPlayer() {
   if (P) clearInterval(P.timer);
@@ -609,15 +713,15 @@ function stopPlayer() {
   releaseWake(); P = null;
 }
 function finishProgram() {
-  const p = P.p, sec = Math.round((Date.now() - P.startedAt) / 1000);
+  const p = P.p, sec = Math.round((Date.now() - P.startedAt) / 1000), signals = P.signals || 0;
   const hadToday = doneDays().has(dayKey());
   stopPlayer();
   beep(880, 0.15); setTimeout(() => beep(1320, 0.4), 160);
   vib([100, 80, 300]);
   speak('終了。お疲れさまでした');
-  db.history.push({ id: uid(), day: dayKey(), at: Date.now(), programId: p.id, name: p.name, sec, items: p.items.length });
+  db.history.push({ id: uid(), day: dayKey(), at: Date.now(), programId: p.id, name: p.name, sec, items: p.items.length, ...(signals ? { signals } : {}) });
   save();
-  lastDone = { name: p.name, sec, items: p.items.length, newDay: !hadToday };
+  lastDone = { name: p.name, sec, items: p.items.length, newDay: !hadToday, signals };
   view = 'done'; render();
 }
 
@@ -631,6 +735,7 @@ function renderDone() {
       <div class="muted">${d.newDay ? (st === 1 ? '連続記録スタート！明日も続けよう' : '連続記録を更新しました') : `今日も${st}日連続をキープ中`}</div>
       <div class="stats">
         <div class="card"><span class="muted">メニュー</span><b>${d.items}種目</b></div>
+        ${d.signals ? `<div class="card"><span class="muted">合図</span><b>${d.signals}回</b></div>` : ''}
         <div class="card"><span class="muted">時間</span><b>${fmt(d.sec)}</b></div>
         <div class="card"><span class="muted">累計</span><b>${db.history.length}回</b></div>
       </div>
@@ -652,7 +757,7 @@ function renderHistory() {
   }
   const logs = db.history.slice().reverse().slice(0, 50).map(h => {
     const dt = new Date(h.at);
-    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目</div></div>
+    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目${h.signals ? `・🎯合図${h.signals}回` : ''}</div></div>
       <div class="log-r"><span class="muted">${fmt(h.sec || 0)}</span><button class="log-del" data-act="del-log" data-id="${h.id}" aria-label="記録を削除">🗑</button></div></div>`;
   }).join('') || '<div class="empty">まだ記録がありません</div>';
 
@@ -871,13 +976,13 @@ function renderMember() {
           <div class="prog-meta"><span class="badge ${c}">${CAT[c].label}</span>　${p.items.length}種目・約${fmt(totalSec(p))}</div></div>
         <div class="chev">${open ? '▲' : '▼'}</div>
       </div>
-      ${open ? `<ol class="mitems">${p.items.map(i => `<li><span class="badge ${i.category}">${CAT[i.category].label}</span> ${esc(i.name)} <b>${i.sec}秒</b>${i.interval ? `<span class="muted">（休${i.interval}秒）</span>` : ''}</li>`).join('')}</ol>` : ''}
+      ${open ? `<ol class="mitems">${p.items.map(i => `<li><span class="badge ${i.category}">${CAT[i.category].label}</span> ${esc(i.name)} <b>${isR6(i) ? `🎯 ${r6Sub(i)}` : `${i.sec}秒`}</b>${i.interval ? `<span class="muted">（休${i.interval}秒）</span>` : ''}</li>`).join('')}</ol>` : ''}
       ${me ? '' : `<button class="btn blue small" data-act="copy-prog" data-id="${esc(p.id)}">＋ 自分のメニューに追加</button>`}
     </div>`;
   }).join('') || '<div class="empty">メニューはありません</div>';
   const logs = member.history.slice().reverse().slice(0, 30).map(h => {
     const dt = new Date(h.at);
-    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目</div></div>
+    return `<div class="card log"><div><b>${esc(h.name)}</b><div class="muted">${dt.getMonth() + 1}/${dt.getDate()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}・${h.items}種目${h.signals ? `・🎯合図${h.signals}回` : ''}</div></div>
       <div class="muted">${fmt(h.sec || 0)}</div></div>`;
   }).join('') || '<div class="empty">まだ記録がありません</div>';
   app.innerHTML = back + `
@@ -1054,13 +1159,21 @@ app.addEventListener('click', e => {
     case 'more': programMenu(id); break;
     case 'new': openEditor(null); break;
     // editor
-    case 'cat': readForm(); E.form.category = id; render(); break;
+    case 'cat': readForm(); E.form.category = id; if (id !== 'foot') E.form.kind = 'normal'; keepScroll(renderEditor); break;
+    case 'kind': readForm(); E.form.kind = id; keepScroll(renderEditor); break;
+    case 'sets': { const el = app.querySelector('#f-sets'); el.value = Math.min(10, Math.max(1, (parseInt(el.value, 10) || 1) + +id)); break; }
+    case 'tempo': { const el = app.querySelector('#f-tempo'); el.value = (Math.round(Math.min(5, Math.max(0.8, (parseFloat(el.value) || 2) + +id)) * 10) / 10).toFixed(1); break; }
+    case 'tempo-set': app.querySelector('#f-tempo').value = Number(id).toFixed(1); break;
+    case 'srest': { const el = app.querySelector('#f-srest'); el.value = Math.max(0, (parseInt(el.value, 10) || 0) + +id); break; }
+    case 'srest-set': app.querySelector('#f-srest').value = id; break;
+    case 'pt-toggle': { readForm(); const n = +id, pts = E.form.points; E.form.points = pts.includes(n) ? pts.filter(x => x !== n) : pts.concat(n).sort(); if (E.form.points.length < 2) toast('2つ以上選んでください'); keepScroll(renderEditor); break; }
+    case 'pt-preset': { readForm(); const pr = R6_PRESETS.find(x => x[0] === id); if (pr) E.form.points = pr[2].slice(); keepScroll(renderEditor); break; }
     case 'preset': app.querySelector('#f-name').value = id; break;
     case 'sec': { const el = app.querySelector('#f-sec'); el.value = Math.max(5, (parseInt(el.value, 10) || 0) + +id); break; }
     case 'sec-set': app.querySelector('#f-sec').value = id; break;
     case 'isec': { const el = app.querySelector('#f-int'); el.value = Math.max(5, (parseInt(el.value, 10) || 0) + +id); break; }
     case 'isec-set': app.querySelector('#f-int').value = id; break;
-    case 'int': readForm(); E.form.useInt = id === '1'; render(); break;
+    case 'int': readForm(); E.form.useInt = id === '1'; keepScroll(renderEditor); break;
     case 'add-next': addNext(); break;
     case 'finish-edit': finishEdit(); break;
     case 'edit-item': startEditItem(+id); break;
